@@ -13,10 +13,11 @@ defmodule Down.MintBackend do
       inactivity_timeout: _inactivity_timeout
     } = req
 
-    headers = Map.to_list(headers)
     method = method(method)
     transport_opts = [transport_opts: [timeout: connect_timeout]]
-    {scheme, host, port, path} = desconstruct_url(url)
+    {scheme, host, port, path, userinfo} = desconstruct_url(url)
+    headers = authorization_header(headers, userinfo)
+    headers = Map.to_list(headers)
 
     with {:ok, conn} <- Mint.HTTP.connect(scheme, host, port, transport_opts),
          {:ok, conn, request_ref} <- Mint.HTTP.request(conn, method, path, headers, body) do
@@ -27,13 +28,28 @@ defmodule Down.MintBackend do
   end
 
   defp desconstruct_url(url) do
-    %URI{scheme: scheme, host: host, port: port, path: path, query: query} = URI.parse(url)
+    %URI{
+      scheme: scheme,
+      host: host,
+      port: port,
+      path: path,
+      query: query,
+      userinfo: userinfo
+    } = URI.parse(url)
+
     path = %URI{path: path, query: query} |> URI.to_string()
     scheme = String.to_atom(scheme)
-    {scheme, host, port, path}
+    {scheme, host, port, path, userinfo}
   end
 
   defp method(method), do: method |> Atom.to_string() |> String.upcase()
+
+  defp authorization_header(headers, nil), do: headers
+
+  defp authorization_header(headers, userinfo) do
+    headers
+    |> Map.put("Authorization", "Basic #{Base.encode64(userinfo, padding: false)}")
+  end
 
   # TODO ?
   def next_chunk(_ret) do
@@ -76,6 +92,4 @@ defmodule Down.MintBackend do
   def handle_mint_msg(_ret, :unknown, msg) do
     {:no_parsed, msg}
   end
-
-  def stop(%{conn: conn}), do: Mint.HTTP.close(conn)
 end

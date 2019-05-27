@@ -195,6 +195,8 @@ docker run -p 6080:80 -d kennethreitz/httpbin
 
 Before publishing a stable version the following tasks should be done:
 
+* :inet.setopts(active: :once)
+* :hackney.stream_next()
 * Check the minimum compatible version for the backends dependencies.
 * Improve tests.
 * Improve docs.

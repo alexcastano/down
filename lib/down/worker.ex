@@ -46,9 +46,12 @@ defmodule Down.Worker do
   defp new_response(), do: %{headers: [], status_code: nil, size: nil, encoding: nil}
 
   defp build_req(url, opts) do
-    with {:ok, url} <- Down.Utils.normalize_url(url),
+    with {:ok, url, userinfo} <- Down.Utils.normalize_url(url),
          {:ok, method} <- Down.Utils.validate_method(opts[:method]),
-         {:ok, headers} <- Down.Utils.normalize_headers(opts[:headers]) do
+         {:ok, headers} <- Down.Utils.normalize_headers(opts[:headers]),
+         {:ok, headers} <- Down.Utils.add_basic_auth_header(headers, opts[:basic_auth]),
+         {:ok, headers} <- Down.Utils.add_basic_auth_header(headers, userinfo)
+    do
       {:ok,
        %{
          url: url,

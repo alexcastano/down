@@ -325,6 +325,18 @@ defmodule DownTest do
         assert {:error, :timeout} = Down.download("#{@base_url}/delay/2", opts)
       end
 
+      test "basic auth" do
+        url = "http://aladin:open_sesame@localhost:6080/basic-auth/aladin/open_sesame"
+        assert {:ok, %{response: %{status_code: 200}}} =
+                 Down.download(url, backend: @backend)
+
+        url = "#{@base_url}/basic-auth/aladin/open_sesame"
+        assert {:ok, %{response: %{status_code: 200}}} =
+                 Down.download(url, backend: @backend, basic_auth: {"aladin", "open_sesame"})
+
+        assert {:ok, %{response: %{status_code: 200}}} =
+                 Down.download(url, backend: @backend, basic_auth: "aladin:open_sesame")
+      end
       if @backend == :ibrowse do
         test "returns inactivity timeout errors" do
           opts = [inactivity_timeout: 100, backend: @backend]
