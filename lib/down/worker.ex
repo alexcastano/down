@@ -58,11 +58,10 @@ defmodule Down.Worker do
          backend_opts: Map.get(opts, :backend_opts, []),
          total_timeout: Map.get(opts, :total_timeout, :infinity),
          connect_timeout: Map.get(opts, :connect_timeout, 15_000),
-         inactivity_timeout: Map.get(opts, :inactivity_timeout, 120_000),
+         inactivity_timeout: Map.get(opts, :inactivity_timeout, 120_000)
        }}
     end
   end
-
 
   @impl true
   def handle_call(:next_chunk, _from, %{buffer: [], backend_data: nil} = state) do

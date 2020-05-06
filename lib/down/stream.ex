@@ -27,5 +27,4 @@ defmodule Down.Stream do
   end
 
   defp stream_stop(pid), do: GenServer.stop(pid)
-
 end

@@ -8,7 +8,7 @@ defmodule ExDown.MixProject do
       elixir: "~> 1.8",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      docs: docs(),
+      docs: docs()
     ]
   end
 
@@ -25,21 +25,21 @@ defmodule ExDown.MixProject do
       main: "readme",
       extras: ["README.md"],
       canonical: "http://hexdocs.pm/down",
-      source_url: "https://github.com/alexcastano/down",
+      source_url: "https://github.com/alexcastano/down"
     ]
   end
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:httpotion, "~> 3.1.0", optional: true},
-      {:hackney, "~> 1.15.1", optional: true},
+      {:httpotion, "~> 3.1", optional: true},
+      {:hackney, "~> 1.15", optional: true},
       {:castore, "~> 0.1.0", optional: true},
-      {:mint, "~> 0.2.0", optional: true},
+      {:mint, "~> 1.0", optional: true},
       {:jason, "~> 1.1", only: :test},
-      {:benchee, "~> 0.11", only: :dev},
+      {:benchee, "~> 1.0.0", only: :dev},
       # {:sweet_xml, ">= 0.0.0"},
-      {:ex_doc, "~> 0.19", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.19", only: :dev, runtime: false}
     ]
   end
 end

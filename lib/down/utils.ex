@@ -44,13 +44,17 @@ defmodule Down.Utils do
     |> case do
       %{scheme: scheme} when scheme not in ["http", "https"] ->
         {:error, :invalid_url}
-      %{host: nil} ->
+
+      %{host: ""} ->
         {:error, :invalid_url}
+
       %{port: port} when port < 0 or port > 65355 ->
         {:error, :invalid_url}
+
       %{path: nil} = uri ->
         uri = Map.put(uri, :path, "/")
         {:ok, URI.to_string(uri)}
+
       uri ->
         # FIXME encode URI.char_unescaped?(char) chars
         {:ok, URI.to_string(uri)}
@@ -63,12 +67,14 @@ defmodule Down.Utils do
   def validate_method(_), do: {:error, :invalid_method}
 
   def normalize_headers(nil), do: normalize_headers([])
+
   def normalize_headers(headers) when is_map(headers) or is_list(headers) do
     {:ok,
      headers
      |> Enum.into(%{}, fn {key, value} -> {to_string(key), to_string(value)} end)
      |> Map.put_new("User-Agent", "Down/#{@version}")}
   end
+
   def normalize_headers(h), do: {:error, {:invalid_request, :headers, h}}
 
   def get_backend(%{backend: backend}), do: get_backend_impl(backend)
@@ -83,7 +89,6 @@ defmodule Down.Utils do
   def get_backend_impl(Mint), do: Down.MintBackend
   def get_backend_impl(backend) when is_atom(backend), do: backend
   def get_backend_impl(backend), do: raise("Invalid backend #{inspect(backend)}")
-
 
   def process_headers(headers) do
     Enum.reduce(headers, %{}, fn {key, value}, acc ->
@@ -125,29 +130,30 @@ defmodule Down.Utils do
       [timestamp(), "-", :os.getpid(), "-", random_string()]
       |> add_extension(ext)
       |> Enum.join()
+
     Path.join(tmp_dir(), name)
   end
 
   defp tmp_dir() do
-    case System.tmp_dir do
+    case System.tmp_dir() do
       nil -> "/tmp"
       path -> path
     end
   end
 
   defp timestamp() do
-    {ms, s, _} = :os.timestamp
+    {ms, s, _} = :os.timestamp()
     Integer.to_string(ms * 1_000_000 + s)
   end
 
   defp add_extension(parts, ext)
   defp add_extension(parts, nil), do: parts
   defp add_extension(parts, ""), do: parts
-  defp add_extension(parts, ("." <> _ext) = ext), do: parts ++ [ext]
+  defp add_extension(parts, "." <> _ext = ext), do: parts ++ [ext]
   defp add_extension(parts, ext), do: parts ++ [".", ext]
 
   defp random_string do
-    Integer.to_string(rand_uniform(0x100000000), 36) |> String.downcase
+    Integer.to_string(rand_uniform(0x100000000), 36) |> String.downcase()
   end
 
   if :erlang.system_info(:otp_release) >= '18' do
