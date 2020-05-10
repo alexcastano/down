@@ -1,0 +1,7 @@
+version: '3'
+
+services:
+  httpbin:
+    image: kennethreitz/httpbin
+    ports:
+      - "6080:80"
