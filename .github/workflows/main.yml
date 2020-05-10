@@ -56,5 +56,5 @@ jobs:
         run: docker-compose up --detach
 
       - name: Run tests
-        run: mix test --trace --include proxy
+        run: mix test --trace
 
