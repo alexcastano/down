@@ -1,15 +1,20 @@
 defmodule Down.HttpcBackend do
   @moduledoc false
 
+  @type state :: %{
+          ref: reference(),
+          pid: nil | pid()
+        }
+
+  @spec run(Down.request(), pid) :: {:ok, state(), Down.request()}
   def run(req, pid) do
     %{
       method: method,
       body: body,
       url: url,
       headers: headers,
-      total_timeout: total_timeout,
       connect_timeout: connect_timeout,
-      inactivity_timeout: _inactivity_timeout,
+      recv_timeout: recv_timeout,
       backend_opts: backend_opts
     } = req
 
@@ -19,7 +24,7 @@ defmodule Down.HttpcBackend do
       backend_opts
       |> Enum.into([])
       |> Keyword.put(:autoredirect, false)
-      |> Keyword.put(:timeout, total_timeout)
+      |> Keyword.put(:timeout, recv_timeout)
       |> Keyword.put(:connect_timeout, connect_timeout)
 
     options = [
@@ -56,7 +61,11 @@ defmodule Down.HttpcBackend do
     for {key, value} <- headers, do: {to_charlist(key), to_charlist(value)}
   end
 
-  def next_chunk(%{pid: pid}), do: :httpc.stream_next(pid)
+  @spec next_chunk(state()) :: state()
+  def next_chunk(%{pid: pid} = state) do
+    :ok = :httpc.stream_next(pid)
+    state
+  end
 
   def handle_info(%{ref: ref}, {:http, {ref, :stream_start, headers, pid}}) do
     headers = Down.Utils.process_headers(headers)
@@ -96,5 +105,6 @@ defmodule Down.HttpcBackend do
 
   def handle_info(_, msg), do: {:no_parsed, msg}
 
+  @spec stop(state()) :: :ok
   def stop(%{pid: pid}), do: :httpc.cancel_request(pid)
 end

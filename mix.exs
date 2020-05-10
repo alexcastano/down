@@ -5,8 +5,9 @@ defmodule ExDown.MixProject do
     [
       app: :down,
       version: "0.0.1",
-      elixir: "~> 1.5",
+      elixir: "~> 1.6",
       start_permanent: Mix.env() == :prod,
+      dialyzer: dialyzer(),
       deps: deps(),
       docs: docs()
     ]
@@ -17,6 +18,13 @@ defmodule ExDown.MixProject do
     [
       extra_applications: [:logger],
       mod: {Down.Application, []}
+    ]
+  end
+
+  defp dialyzer() do
+    [
+      plt_file: {:no_warn, "priv/plts/dialyzer.plt"},
+      plt_ignore_apps: [:benchee]
     ]
   end
 
@@ -39,6 +47,7 @@ defmodule ExDown.MixProject do
       {:jason, "~> 1.1", only: :test},
       {:benchee, "~> 1.0.0", only: :dev},
       # {:sweet_xml, ">= 0.0.0"},
+      {:dialyxir, "~> 1.0", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}
     ]
   end

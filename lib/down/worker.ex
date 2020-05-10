@@ -1,6 +1,28 @@
 defmodule Down.Worker do
   @moduledoc false
 
+  @type operation :: :download | :stream | :read
+
+  @type state :: %{
+          backend: atom(),
+          backend_data: term(),
+          buffer: list(),
+          client_pid: pid(),
+          current_redirects: integer(),
+          destination: nil | String.t(),
+          error: nil | term(),
+          file: nil | File.t(),
+          file_path: nil | String.t(),
+          finished: boolean(),
+          max_redirects: :infinity | non_neg_integer(),
+          max_size: nil | non_neg_integer(),
+          operation: operation(),
+          position: non_neg_integer(),
+          request: Down.request(),
+          response: Down.response(),
+          stream_reply_to: nil
+        }
+
   use GenServer, restart: :transient
 
   def start_link(args) do
@@ -9,16 +31,13 @@ defmodule Down.Worker do
     GenServer.start_link(__MODULE__, args, gen_opts)
   end
 
-  # server
-
   @impl true
+  @spec init({String.t(), operation(), pid(), map()}) :: {:ok, state()} | {:stop, term}
   def init({url, operation, client_pid, opts}) do
-    with {:ok, request} <- build_req(url, opts),
-         backend = Down.Utils.get_backend(opts),
-         {:ok, backend_data, request} <- backend.run(request, self()) do
+    with {:ok, request} <- build_req(url, opts) do
       state = %{
-        backend: backend,
-        backend_data: backend_data,
+        backend: Down.Utils.get_backend(opts),
+        backend_data: nil,
         buffer: [],
         current_redirects: 0,
         destination: Map.get(opts, :destination),
@@ -36,15 +55,27 @@ defmodule Down.Worker do
         stream_reply_to: nil
       }
 
-      {:ok, state}
+      {:ok, state, {:continue, :start}}
     else
-      # FIXME
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp new_response(), do: %{headers: [], status_code: nil, size: nil, encoding: nil}
+  @impl true
+  def handle_continue(:start, state) do
+    with {:ok, backend_data, request} <- state.backend.run(state.request, self()) do
+      {:noreply, %{state | backend_data: backend_data, request: request}}
+    else
+      {:error, reason} -> {:stop, :normal, %{state | error: reason}}
+    end
+  end
 
+  @spec new_response() :: Down.response()
+  # FIXME
+  # defp new_response(), do: %{headers: [], status_code: nil, size: nil, encoding: nil}
+  defp new_response(), do: %{headers: %{}, status_code: nil, size: nil, encoding: nil}
+
+  @spec build_req(String.t(), Keyword.t()) :: {:ok, Down.request()} | {:error | term()}
   defp build_req(url, opts) do
     with {:ok, url} <- Down.Utils.normalize_url(url),
          {:ok, method} <- Down.Utils.validate_method(opts[:method]),
@@ -58,7 +89,7 @@ defmodule Down.Worker do
          backend_opts: Map.get(opts, :backend_opts, []),
          total_timeout: Map.get(opts, :total_timeout, :infinity),
          connect_timeout: Map.get(opts, :connect_timeout, 15_000),
-         inactivity_timeout: Map.get(opts, :inactivity_timeout, 120_000)
+         recv_timeout: Map.get(opts, :recv_timeout, 120_000)
        }}
     end
   end
@@ -73,12 +104,15 @@ defmodule Down.Worker do
   end
 
   def handle_call(:next_chunk, _from, %{buffer: [head | rest]} = state) do
-    state = %{state | buffer: rest}
-    ask_next_chunk_if_need_it(state)
+    state = maybe_ask_for_next_chunk(%{state | buffer: rest})
     {:reply, head, state}
   end
 
   @impl true
+  def handle_info(:timeout, state) do
+    {:stop, :normal, %{state | error: :timeout}}
+  end
+
   def handle_info(msg, state) do
     msg
     |> backend_handle_info(state)
@@ -91,38 +125,142 @@ defmodule Down.Worker do
   defp handle_backend_reply({:no_parsed, _msg}, state), do: {:noreply, state}
 
   defp handle_backend_reply({:parsed, action, backend_data, force_next_chunk}, state) do
-    state = %{state | backend_data: backend_data}
+    state = process_backend_action(action, %{state | backend_data: backend_data})
 
-    case process_backend_action(action, state) do
-      {:ok, state} ->
-        state = reply_to_client(state)
-        ask_next_chunk_if_need_it(state, force_next_chunk)
-        {:noreply, state}
+    with :ok <- verify_no_errors(state),
+         :ok <- verify_no_redirect(state),
+         :ok <- verify_max_size(state),
+         :ok <- verify_no_finished(state) do
+      state =
+        state
+        |> maybe_reply_to_client()
+        |> maybe_ask_for_next_chunk(force_next_chunk)
 
-      {:redirect, state} ->
-        state = stop_backend(state)
-
-        case go_redirect(state) do
-          {:ok, state} -> {:noreply, state}
-          {:error, error} -> {:stop, :normal, %{state | error: error}}
-        end
-
-      {:done, state} ->
-        state = reply_to_client(state)
-        if should_stop?(state), do: {:stop, :normal, state}, else: {:noreply, state}
-
-      {:error, state} ->
-        {:stop, :normal, state}
+      {:noreply, state}
     end
   end
 
-  defp reply_to_client(state = %{operation: :stream, stream_reply_to: pid, buffer: [head | tail]})
+  @spec verify_no_errors(state()) :: :ok | {:stop, :normal, state()}
+  defp verify_no_errors(%{error: nil}), do: :ok
+  defp verify_no_errors(state), do: {:stop, :normal, state}
+
+  @spec verify_no_finished(state()) :: :ok | {:stop, :normal, state()}
+  defp verify_no_finished(%{backend_data: nil} = state) do
+    if should_stop?(state) do
+      {:stop, :normal, state}
+    else
+      :ok
+    end
+  end
+
+  defp verify_no_finished(_state), do: :ok
+
+  @spec should_stop?(state()) :: boolean()
+  defp should_stop?(%{operation: :stream}), do: false
+  defp should_stop?(_), do: true
+
+  @spec verify_max_size(state()) :: :ok | {:stop, :normal, state()}
+  defp verify_max_size(%{max_size: nil}), do: :ok
+
+  defp verify_max_size(state = %{position: current_size, max_size: max_size})
+       when is_integer(current_size) and current_size > max_size do
+    {:stop, :normal, %{state | error: :too_large}}
+  end
+
+  # defp verify_max_size(state) %{"content-length" => size}, %{max_size: max_size}) do
+  #   if String.to_integer(size) > max_size, do: {:error, :too_large}, else: :ok
+  # end
+
+  defp verify_max_size(_), do: :ok
+
+  @redirect_status [301, 302, 303, 307, 308]
+
+  @spec verify_no_redirect(state()) :: :ok | {:noreply, state} | {:stop, :normal, state}
+  # defp verify_no_redirect(%{response: %{headers: []}}), do: :ok
+  defp verify_no_redirect(%{response: %{headers: headers}}) when headers == %{}, do: :ok
+
+  defp verify_no_redirect(%{response: %{status_code: status}} = state)
+       when status in @redirect_status do
+    state
+    |> maybe_stop_backend()
+    |> maybe_follow_redirect()
+    |> case do
+      {:ok, state} -> {:noreply, state}
+      {:error, error} -> {:stop, :normal, %{state | error: error}}
+    end
+  end
+
+  defp verify_no_redirect(_), do: :ok
+
+  @spec maybe_follow_redirect(state) :: {:ok, state()} | {:error, term()}
+  defp maybe_follow_redirect(%{current_redirects: c, max_redirects: m})
+       when m != :infinite and c >= m,
+       do: {:error, :too_many_redirects}
+
+  defp maybe_follow_redirect(%{backend: backend} = state) do
+    with {:ok, redirect_url} <- build_redirect_url(state),
+         state = build_redirected_state(state, redirect_url),
+         {:ok, backend_data, request} <- backend.run(state.request, self()) do
+      {:ok, %{state | request: request, backend_data: backend_data}}
+    end
+  end
+
+  @spec build_redirected_state(state(), Strint.t()) :: state()
+  defp build_redirected_state(state, redirect_url) do
+    Map.merge(state, %{
+      request: build_new_request(state, redirect_url),
+      response: new_response(),
+      position: 0,
+      buffer: [],
+      current_redirects: state.current_redirects + 1
+    })
+  end
+
+  @spec build_new_request(state(), String.t()) :: Down.request()
+  defp build_new_request(%{response: %{status_code: status_code}} = state, redirect_url)
+       when status_code in [307, 308] do
+    %{state.request | url: redirect_url}
+  end
+
+  defp build_new_request(%{response: %{status_code: status_code}} = state, redirect_url)
+       when status_code in [301, 302, 303] do
+    headers = Map.delete(state.request.headers, "Content-Type")
+
+    Map.merge(state.request, %{
+      method: :get,
+      body: nil,
+      headers: headers,
+      url: redirect_url
+    })
+  end
+
+  defp build_redirect_url(%{request: %{url: current_url}, response: %{headers: headers}}) do
+    case headers["location"] do
+      nil ->
+        {:error, :invalid_redirect}
+
+      redirect_url ->
+        case URI.parse(redirect_url) do
+          # relative redirect
+          %{host: host, scheme: scheme} when is_nil(host) or is_nil(scheme) ->
+            {:ok, URI.merge(current_url, redirect_url) |> URI.to_string()}
+
+          # absolute redirect
+          _ ->
+            {:ok, redirect_url}
+        end
+    end
+  end
+
+  defp maybe_reply_to_client(
+         state = %{operation: :stream, stream_reply_to: pid, buffer: [head | tail]}
+       )
        when not is_nil(pid) do
     GenServer.reply(pid, head)
     %{state | buffer: tail, stream_reply_to: nil}
   end
 
-  defp reply_to_client(
+  defp maybe_reply_to_client(
          state = %{operation: :stream, stream_reply_to: pid, backend_data: nil, buffer: []}
        )
        when not is_nil(pid) do
@@ -130,102 +268,49 @@ defmodule Down.Worker do
     %{state | stream_reply_to: nil}
   end
 
-  defp reply_to_client(state), do: state
+  defp maybe_reply_to_client(state), do: state
 
-  defp should_stop?(%{operation: :stream}), do: false
-  defp should_stop?(_), do: true
+  @spec maybe_ask_for_next_chunk(state(), :force_next_chunk | :ignore) :: state()
+  defp maybe_ask_for_next_chunk(state, arg \\ :ignore)
 
-  defp go_redirect(%{current_redirects: c, max_redirects: m})
-       when m != :infinite and c >= m,
-       do: {:error, :too_many_redirects}
-
-  defp go_redirect(%{backend: backend} = state) do
-    with {:ok, request} <- build_new_request(state),
-         state = Map.merge(state, %{request: request, response: new_response()}),
-         {:ok, backend_data, request} <- backend.run(request, self()) do
-      {:ok,
-       %{
-         state
-         | request: request,
-           backend_data: backend_data,
-           current_redirects: state.current_redirects + 1
-       }}
-    end
-  end
-
-  defp build_new_request(%{response: %{status_code: status_code}} = state)
-       when status_code in [307, 308] do
-    with {:ok, redirect_url} <- Down.Utils.build_redirect_url(state) do
-      {:ok, %{state.request | url: redirect_url}}
-    end
-  end
-
-  defp build_new_request(%{response: %{status_code: status_code}} = state)
-       when status_code in [301, 302, 303] do
-    with {:ok, redirect_url} <- Down.Utils.build_redirect_url(state) do
-      headers = Map.delete(state.request.headers, "Content-Type")
-
-      request =
-        Map.merge(state.request, %{
-          method: :get,
-          body: nil,
-          headers: headers,
-          url: redirect_url
-        })
-
-      {:ok, request}
-    end
-  end
-
-  defp build_new_request(_), do: {:error, :invalid_redirect}
-
-  defp ask_next_chunk_if_need_it(state, arg \\ :ignore)
-
-  defp ask_next_chunk_if_need_it(state, :force_next_chunk),
+  defp maybe_ask_for_next_chunk(state, :force_next_chunk),
     do: ask_next_chunk(state)
 
-  defp ask_next_chunk_if_need_it(%{backend_data: nil}, _), do: :ok
+  defp maybe_ask_for_next_chunk(%{backend_data: nil} = state, _), do: state
 
-  defp ask_next_chunk_if_need_it(state = %{operation: :stream, buffer: []}, _),
+  defp maybe_ask_for_next_chunk(state = %{operation: :stream, buffer: []}, _),
     do: ask_next_chunk(state)
 
-  defp ask_next_chunk_if_need_it(%{operation: :stream}, _), do: :ok
+  defp maybe_ask_for_next_chunk(%{operation: :stream} = state, _), do: state
 
-  defp ask_next_chunk_if_need_it(%{operation: operation} = state, _)
+  defp maybe_ask_for_next_chunk(%{operation: operation} = state, _)
        when operation in [:download, :read],
        do: ask_next_chunk(state)
 
-  defp ask_next_chunk(%{backend: backend, backend_data: backend_data}),
-    do: backend.next_chunk(backend_data)
+  @spec ask_next_chunk(state()) :: state()
+  defp ask_next_chunk(state = %{backend: backend, backend_data: backend_data}) do
+    backend_data = backend.next_chunk(backend_data)
+    %{state | backend_data: backend_data}
+  end
 
   defp process_backend_action(actions, state) when is_list(actions) do
-    Enum.reduce(actions, {:ok, state}, fn
-      action, {:ok, state} ->
-        process_backend_action(action, state)
-
-      _action, ret ->
-        ret
-    end)
+    Enum.reduce(actions, state, &process_backend_action/2)
   end
 
-  defp process_backend_action(:ignore, state), do: {:ok, state}
+  defp process_backend_action(:ignore, state), do: state
 
-  defp process_backend_action(:done, state) do
-    {:done, %{state | backend_data: nil}}
-  end
+  defp process_backend_action(:done, state), do: %{state | backend_data: nil}
 
   # Ibrowse return empty chunks sometimes
-  defp process_backend_action({:chunk, ""}, state), do: {:ok, state}
+  defp process_backend_action({:chunk, ""}, state), do: state
 
   defp process_backend_action({:chunk, chunk}, %{position: position} = state) do
-    with {:ok, state} <- perform_operation(chunk, state),
-         position = position + byte_size(chunk),
-         :ok <- check_max_size(position, state),
-         :ok <- ask_next_chunk_if_need_it(state) do
-      {:ok, %{state | position: position}}
+    with {:ok, state} <- perform_operation(chunk, state) do
+      position = position + byte_size(chunk)
+      %{state | position: position}
     else
       {:error, error} ->
-        {:error, %{state | error: error}}
+        %{state | error: error}
     end
   end
 
@@ -233,33 +318,17 @@ defmodule Down.Worker do
     size = get_size_header(headers)
     encoding = get_encoding_header(headers)
 
-    state =
-      state
-      |> put_in([:response, :headers], headers)
-      |> put_in([:response, :size], size)
-      |> put_in([:response, :encoding], encoding)
-
-    with :ok <- check_max_size(headers, state),
-         :ok <- verify_redirection(state) do
-      {:ok, state}
-    else
-      {:redirect, _state} = ret ->
-        ret
-
-      {:error, error} ->
-        {:error, %{state | error: error}}
-    end
+    state
+    |> put_in([:response, :headers], headers)
+    |> put_in([:response, :size], size)
+    |> put_in([:response, :encoding], encoding)
   end
 
   defp process_backend_action({:status_code, status_code}, state) do
-    state = put_in(state, [:response, :status_code], status_code)
-
-    with :ok <- verify_redirection(state), do: {:ok, state}
+    put_in(state, [:response, :status_code], status_code)
   end
 
-  defp process_backend_action({:error, error}, state) do
-    {:error, %{state | error: error}}
-  end
+  defp process_backend_action({:error, error}, state), do: %{state | error: error}
 
   defp perform_operation(chunk, %{operation: operation, buffer: []} = state)
        when operation in [:read, :stream] do
@@ -290,17 +359,6 @@ defmodule Down.Worker do
     {file_path, file}
   end
 
-  @redirect_status [301, 302, 303, 307, 308]
-
-  defp verify_redirection(%{response: %{headers: []}}), do: :ok
-  defp verify_redirection(%{response: %{status_code: nil}}), do: :ok
-
-  defp verify_redirection(%{response: %{status_code: status}} = state)
-       when status in @redirect_status,
-       do: {:redirect, state}
-
-  defp verify_redirection(_), do: :ok
-
   defp get_size_header(%{"content-length" => size}) when is_binary(size),
     do: String.to_integer(size)
 
@@ -311,17 +369,12 @@ defmodule Down.Worker do
   defp get_encoding_header(_), do: nil
 
   @impl true
-  def terminate(reason, %{file: file} = state) when not is_nil(file) do
-    File.close(file)
-    terminate(reason, %{state | file: nil})
-  end
-
-  def terminate(reason, %{backend_data: backend_data} = state) when not is_nil(backend_data) do
-    state = stop_backend(state)
-    terminate(reason, state)
-  end
-
   def terminate(reason, %{client_pid: pid} = state) do
+    state =
+      state
+      |> maybe_close_file()
+      |> maybe_stop_backend()
+
     case {reason, state.error, state.response.status_code} do
       {:normal, nil, status} when (status >= 200 and status <= 299) or is_nil(status) ->
         case build_reply(state) do
@@ -340,22 +393,19 @@ defmodule Down.Worker do
     end
   end
 
-  defp stop_backend(%{backend: backend, backend_data: backend_data} = state) do
+  defp maybe_close_file(%{file: nil} = state), do: state
+
+  defp maybe_close_file(state) do
+    File.close(state.file)
+    %{state | file: nil}
+  end
+
+  defp maybe_stop_backend(%{backend_data: nil} = state), do: state
+
+  defp maybe_stop_backend(%{backend: backend, backend_data: backend_data} = state) do
     backend.stop(backend_data)
     %{state | backend_data: nil}
   end
-
-  defp check_max_size(_, %{max_size: nil}), do: :ok
-
-  defp check_max_size(%{"content-length" => size}, %{max_size: max_size}) do
-    if String.to_integer(size) > max_size, do: {:error, :too_large}, else: :ok
-  end
-
-  defp check_max_size(current_size, %{max_size: max_size})
-       when is_integer(current_size) and current_size > max_size,
-       do: {:error, :too_large}
-
-  defp check_max_size(_, _), do: :ok
 
   defp build_reply(%{operation: :stream}), do: :noreply
 

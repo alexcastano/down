@@ -11,7 +11,7 @@ if Code.ensure_loaded?(:ibrowse) do
         backend_opts: backend_opts,
         total_timeout: total_timeout,
         connect_timeout: connect_timeout,
-        inactivity_timeout: inactivity_timeout
+        recv_timeout: recv_timeout
       } = req
 
       headers = Enum.into(headers, [])
@@ -23,7 +23,7 @@ if Code.ensure_loaded?(:ibrowse) do
         |> Enum.into([])
         |> Keyword.put(:response_format, :binary)
         |> Keyword.put(:stream_to, {pid, :once})
-        |> Keyword.put(:inactivity_timeout, inactivity_timeout)
+        |> Keyword.put(:inactivity_timeout, recv_timeout)
         |> Keyword.put(:connect_timeout, connect_timeout)
 
       case :ibrowse.send_req(url, headers, method, body, backend_opts, total_timeout) do
@@ -43,6 +43,7 @@ if Code.ensure_loaded?(:ibrowse) do
 
     def next_chunk(id) do
       :ok = :ibrowse.stream_next(id)
+      id
     end
 
     def handle_info(id, {:ibrowse_async_response_timeout, id}),

@@ -2,6 +2,9 @@ if Code.ensure_loaded?(:hackney) do
   defmodule Down.HackneyBackend do
     @moduledoc false
 
+    @type state :: reference()
+
+    @spec run(Down.request(), pid) :: {:ok, state(), Down.request()}
     def run(req, pid) do
       %{
         method: method,
@@ -9,9 +12,8 @@ if Code.ensure_loaded?(:hackney) do
         url: url,
         headers: headers,
         backend_opts: backend_opts,
-        total_timeout: total_timeout,
         connect_timeout: connect_timeout,
-        inactivity_timeout: _inactivity_timeout
+        recv_timeout: recv_timeout
       } = req
 
       headers = Enum.into(headers, [])
@@ -24,7 +26,7 @@ if Code.ensure_loaded?(:hackney) do
         |> Keyword.put(:stream, pid)
         |> Keyword.put(:follow_redirect, false)
         |> Keyword.put(:connect_timeout, connect_timeout)
-        |> Keyword.put(:recv_timeout, total_timeout)
+        |> Keyword.put(:recv_timeout, recv_timeout)
 
       case :hackney.request(method, url, headers, body, backend_opts) do
         {:ok, ref} ->
@@ -41,7 +43,11 @@ if Code.ensure_loaded?(:hackney) do
       end
     end
 
-    def next_chunk(ref), do: :ok = :hackney.stream_next(ref)
+    @spec next_chunk(state()) :: state()
+    def next_chunk(ref) do
+      :ok = :hackney.stream_next(ref)
+      ref
+    end
 
     def handle_info(ref, {:hackney_response, ref, {:status, status, _reason}}) do
       {:parsed, {:status_code, status}, ref, true}
@@ -57,10 +63,6 @@ if Code.ensure_loaded?(:hackney) do
     def handle_info(ref, {:hackney_response, ref, chunk}) when is_binary(chunk),
       do: {:parsed, {:chunk, chunk}, ref, false}
 
-    def handle_info(ref, {:hackney_response, ref, {:redirect, url, headers}}) do
-      {:parsed, {:redirect, url, headers}, ref, false}
-    end
-
     def handle_info(ref, {:hackney_response, ref, {:see_other, _, _}}),
       do: {:parsed, :ignore, ref, false}
 
@@ -69,8 +71,8 @@ if Code.ensure_loaded?(:hackney) do
 
     def handle_info(_, msg), do: {:no_parsed, msg}
 
+    @spec stop(state()) :: :ok
     def stop(ref),
-      # do: {:ok, {_response, _transport, _socket, _buffer}} = :hackney.cancel_request(ref)
       do: :hackney.close(ref)
   end
 end

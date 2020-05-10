@@ -4,6 +4,10 @@ defmodule Down.Application do
   use Application
 
   def start(_type, _args) do
-    Supervisor.start_link([Down.Supervisor], strategy: :one_for_one)
+    children = [
+      {DynamicSupervisor, strategy: :one_for_one, name: Down.Supervisor}
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one)
   end
 end

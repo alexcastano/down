@@ -12,7 +12,7 @@ defmodule DownTest do
 
   setup do
     # Needed it because we httpbin fails with too many fast requests
-    Process.sleep(100)
+    Process.sleep(50)
     :ok
   end
 
@@ -318,13 +318,20 @@ defmodule DownTest do
       end
 
       test "returns invalid URL errors" do
-        assert {:error, :invalid_url} = Down.download("foo://example.org")
+        assert {:error, :invalid_url} = Down.download("foo://example.org", backend: @backend)
         # FIXME Some day
         # assert {:error, :invalid_url} = Down.download("http://example.org\\foo")
       end
 
+      if @backend == :httpc, do: @tag(skip: "doesn't work")
+
       test "returns connection error" do
-        assert {:error, :econnrefused} = Down.download("http://localhost:9999")
+        assert {:error, :econnrefused} = Down.download("http://localhost:9999", backend: @backend)
+      end
+
+      test "returns recv timeout errors" do
+        opts = [recv_timeout: 10, backend: @backend]
+        assert {:error, :timeout} = Down.download("#{@base_url}/delay/2", opts)
       end
 
       test "returns total timeout errors" do
@@ -332,22 +339,15 @@ defmodule DownTest do
         assert {:error, :timeout} = Down.download("#{@base_url}/delay/2", opts)
       end
 
-      if @backend == :ibrowse do
-        test "returns inactivity timeout errors" do
-          opts = [inactivity_timeout: 100, backend: @backend]
-          assert {:error, :timeout} = Down.download("#{@base_url}/delay/2", opts)
-        end
+      if @backend not in [:mint, :hackney], do: @tag(skip: true)
+
+      test "returns SSL errors" do
+        assert {:error, :ssl_error} =
+                 Down.download("https://wrong.host.badssl.com/", backend: @backend)
+
+        assert {:error, :ssl_error} =
+                 Down.download("https://expired.badssl.com/", backend: @backend)
       end
-    end
-  end
-
-  describe "with specific hackney" do
-    @tag skip: true
-    test "returns SSL errors" do
-      assert {:error, :ssl_error} =
-               Down.download("https://wrong.host.badssl.com/", backend: :hackney)
-
-      # assert {:error, :ssl_error} = Down.download("https://expired.badssl.com/")
     end
   end
 end

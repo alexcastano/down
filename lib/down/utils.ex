@@ -99,24 +99,6 @@ defmodule Down.Utils do
     end)
   end
 
-  def build_redirect_url(%{request: %{url: current_url}, response: %{headers: headers}}) do
-    case headers["location"] do
-      nil ->
-        {:error, :invalid_redirect}
-
-      redirect_url ->
-        case URI.parse(redirect_url) do
-          # relative redirect
-          %{host: host, scheme: scheme} when is_nil(host) or is_nil(scheme) ->
-            {:ok, URI.merge(current_url, redirect_url) |> URI.to_string()}
-
-          # absolute redirect
-          _ ->
-            {:ok, redirect_url}
-        end
-    end
-  end
-
   def get_original_filename(state) do
     state.response.headers
     |> Map.get("content-disposition")

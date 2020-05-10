@@ -23,3 +23,6 @@ erl_crash.dump
 down-*.tar
 
 .elixir_ls
+
+/priv/plts/*.plt
+/priv/plts/*.plt.hash

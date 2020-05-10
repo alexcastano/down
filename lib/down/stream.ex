@@ -13,9 +13,9 @@ defmodule Down.Stream do
     # timeout = Map.get(opts, :timeout, 5000)
     # gen_opts = [timeout: timeout, debug: [:statistics, :trace]]
     # gen_opts = [timeout: timeout]
-    args = {url, :stream, self(), opts}
+    child = {Down.Worker, {url, :stream, self(), opts}}
 
-    {:ok, pid} = Down.Supervisor.start_child(args)
+    {:ok, pid} = DynamicSupervisor.start_child(Down.Supervisor, child)
     pid
   end
 
