@@ -45,7 +45,7 @@ defmodule Down.Utils do
       %{scheme: scheme} when scheme not in ["http", "https"] ->
         {:error, :invalid_url}
 
-      %{host: ""} ->
+      %{host: host} when host in [nil, ""] ->
         {:error, :invalid_url}
 
       %{port: port} when port < 0 or port > 65355 ->
