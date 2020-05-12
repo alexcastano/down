@@ -40,12 +40,13 @@ defmodule ExDown.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:httpotion, "~> 3.1", optional: true},
+      {:ibrowse, "~> 4.4", optional: true},
       {:hackney, "~> 1.15", optional: true},
-      {:castore, "~> 0.1.0", optional: true},
+      {:castore, "~> 0.1", optional: true},
       {:mint, "~> 1.0", optional: true},
       {:jason, "~> 1.1", only: :test},
       {:benchee, "~> 1.0.0", only: :dev},
+      {:tesla, "~> 1.3.3", only: :dev},
       # {:sweet_xml, ">= 0.0.0"},
       {:dialyxir, "~> 1.0", only: [:dev], runtime: false},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}

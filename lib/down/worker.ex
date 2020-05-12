@@ -1,6 +1,8 @@
 defmodule Down.Worker do
   @moduledoc false
 
+  alias Down.Options
+
   @type operation :: :download | :stream | :read
 
   @type state :: %{
@@ -32,33 +34,31 @@ defmodule Down.Worker do
   end
 
   @impl true
-  @spec init({String.t(), operation(), pid(), map()}) :: {:ok, state()} | {:stop, term}
-  def init({url, operation, client_pid, opts}) do
-    with {:ok, request} <- build_req(url, opts) do
-      state = %{
-        backend: Down.Utils.get_backend(opts),
-        backend_data: nil,
-        buffer: [],
-        current_redirects: 0,
-        destination: Map.get(opts, :destination),
-        error: nil,
-        file: nil,
-        file_path: nil,
-        finished: false,
-        max_redirects: Map.get(opts, :max_redirects, 5),
-        max_size: Map.get(opts, :max_size),
-        operation: operation,
-        client_pid: client_pid,
-        position: 0,
-        request: request,
-        response: new_response(),
-        stream_reply_to: nil
-      }
+  @spec init({operation(), pid(), Options.t()}) :: {:ok, state(), {:continue, :start}}
+  def init({operation, client_pid, %Options{} = opts}) do
+    request = build_req(opts)
 
-      {:ok, state, {:continue, :start}}
-    else
-      {:error, reason} -> {:stop, reason}
-    end
+    state = %{
+      backend: opts.backend,
+      backend_data: nil,
+      buffer: [],
+      current_redirects: 0,
+      destination: opts.destination,
+      error: nil,
+      file: nil,
+      file_path: nil,
+      finished: false,
+      max_redirects: opts.max_redirects,
+      max_size: opts.max_size,
+      operation: operation,
+      client_pid: client_pid,
+      position: 0,
+      request: request,
+      response: new_response(),
+      stream_reply_to: nil
+    }
+
+    {:ok, state, {:continue, :start}}
   end
 
   @impl true
@@ -75,23 +75,18 @@ defmodule Down.Worker do
   # defp new_response(), do: %{headers: [], status_code: nil, size: nil, encoding: nil}
   defp new_response(), do: %{headers: %{}, status_code: nil, size: nil, encoding: nil}
 
-  @spec build_req(String.t(), Keyword.t()) :: {:ok, Down.request()} | {:error | term()}
-  defp build_req(url, opts) do
-    with {:ok, url} <- Down.Utils.normalize_url(url),
-         {:ok, method} <- Down.Utils.validate_method(opts[:method]),
-         {:ok, headers} <- Down.Utils.normalize_headers(opts[:headers]) do
-      {:ok,
-       %{
-         url: url,
-         method: method,
-         body: Map.get(opts, :body),
-         headers: headers,
-         backend_opts: Map.get(opts, :backend_opts, []),
-         total_timeout: Map.get(opts, :total_timeout, :infinity),
-         connect_timeout: Map.get(opts, :connect_timeout, 15_000),
-         recv_timeout: Map.get(opts, :recv_timeout, 120_000)
-       }}
-    end
+  @spec build_req(Options.t()) :: Down.request()
+  defp build_req(opts) do
+    %{
+      url: opts.url,
+      method: opts.method,
+      body: opts.body,
+      headers: opts.headers,
+      backend_opts: opts.backend_opts,
+      total_timeout: opts.total_timeout,
+      connect_timeout: opts.connect_timeout,
+      recv_timeout: opts.recv_timeout
+    }
   end
 
   @impl true
@@ -222,9 +217,11 @@ defmodule Down.Worker do
     %{state.request | url: redirect_url}
   end
 
+  @content_type_regex ~r/^content-type$/i
   defp build_new_request(%{response: %{status_code: status_code}} = state, redirect_url)
        when status_code in [301, 302, 303] do
-    headers = Map.delete(state.request.headers, "Content-Type")
+    headers =
+      Enum.reject(state.request.headers, fn {label, _} -> label =~ @content_type_regex end)
 
     Map.merge(state.request, %{
       method: :get,

@@ -7,7 +7,7 @@ defmodule Down do
   efficient and safe downloads.
   It also allows you to change backend without any code modification.
 
-  The API is very small, it only consist in three operationsÑ
+  The API is very small, it only consist in three operations:
 
   * `read/2` to download the content directly in memory.
   * `download/2` to download the content in a local file.
@@ -37,14 +37,18 @@ defmodule Down do
   * `:recv_timeout` - If a persistent connection is idle longer than the `:recv_timeout`
     in milliseconds, the client closes the connection.
     The server can also have such a timeout but do not take that for granted.
-    Default is 120000 (= 2 min).
+    Default is 30_000.
     Only implemented for `:ibrowse` backend.
   * `:connect_timeout` - The time in milliseconds to wait for the request to connect,
-    :infinity will wait indefinitely (default: 15_000).
+    :infinity will wait indefinitely. The default is 15_000.
   """
+
+  alias Down.Options
 
   @type url :: String.t()
   @type opts :: map() | Keyword.t()
+  @type header :: {String.t(), String.t()}
+  @type headers :: [header]
 
   @type method :: :get | :post | :delete | :put | :patch | :options | :head | :connect | :trace
   @type request :: %{
@@ -67,15 +71,36 @@ defmodule Down do
           encoding: nil | String.t()
         }
 
+  @default_backend [Down.MintBackend, Down.HackneyBackend, Down.IbrowseBackend, Down.HttpcBackend]
+                   |> Enum.find(&Code.ensure_loaded?(&1))
+  @doc """
+  Returns the backend used in case none is passed as an option in any operation.
+
+  The value is fetched from the application environment `Application.get_env(:down, :backend)`.
+  In case it is not set, it will return the first backend compiled from the following list:
+
+  * `Down.MintBackend`
+  * `Down.HackneyBackend`
+  * `Down.IbrowseBackend`
+  * `Down.HttpcBackend`
+
+  Note that `Down.HttpcBackend` is always compiled and will be used in case
+  no optional dependencies have been added.
+  """
+  def default_backend() do
+    Application.get_env(:down, :backend, @default_backend)
+  end
+
   @doc """
   Returns a stream with the content of the remote file.
 
   The remote connection isn't created until the first chunk is requested.
   """
   @spec stream(url, opts) :: Stream.t()
-  def stream(url, opts \\ %{})
-  def stream(url, opts) when is_list(opts), do: stream(url, opts |> Enum.into(%{}))
-  def stream(url, opts) when is_map(opts), do: Down.Stream.new(url, opts)
+  def stream(url, opts \\ %{}) do
+    with {:ok, opts} <- Options.build(url, opts),
+         do: Down.Stream.new(opts)
+  end
 
   @spec download(url(), opts()) :: Download.t()
   def download(url, opts \\ %{}), do: run(:download, url, opts)
@@ -86,15 +111,12 @@ defmodule Down do
   @spec read(url(), opts()) :: String.t()
   def read(url, opts \\ %{}), do: run(:read, url, opts)
 
-  defp run(operation, url, opts) when is_list(opts), do: run(operation, url, Enum.into(opts, %{}))
-
   defp run(operation, url, opts) do
-    args = {url, operation, self(), opts}
-    timeout = Map.get(opts, :total_timeout, :infinity)
-    child = {Down.Worker, args}
-
-    # with {:ok, pid} <- Down.Supervisor.start_child(args) do
-    with {:ok, pid} <- DynamicSupervisor.start_child(Down.Supervisor, child) do
+    with {:ok, opts} <- Options.build(url, opts),
+         timeout = opts.total_timeout,
+         args = {operation, self(), opts},
+         child = {Down.Worker, args},
+         {:ok, pid} <- DynamicSupervisor.start_child(Down.Supervisor, child) do
       ref = Process.monitor(pid)
 
       receive do

@@ -47,8 +47,13 @@ defmodule Down.HttpcBackend do
   defp build_request(method, url, headers, _body) when method in [:head, :get, :options],
     do: build_request(url, headers)
 
+  @content_type_regex ~r/^content-type$/i
   defp build_request(_method, url, headers, body) do
-    content_type = Map.get(headers, "Content-Type") |> to_charlist()
+    content_type =
+      headers
+      |> Enum.find_value(fn {label, value} -> if label =~ @content_type_regex, do: value end)
+      |> to_charlist()
+
     {url, headers} = build_request(url, headers)
     body = to_charlist(body)
     {url, headers, content_type, body}

@@ -10,30 +10,48 @@ defmodule DownTest do
 
   @base_url "http://localhost:6080"
 
-  setup do
-    # Needed it because we httpbin fails with too many fast requests
-    Process.sleep(50)
-    :ok
+  test "default_backend/0" do
+    assert Down.MintBackend == Down.default_backend()
+    Application.put_env(:down, :backend, :fake_backend)
+    assert :fake_backend == Down.default_backend()
+    Application.delete_env(:down, :backend)
+    assert Down.MintBackend == Down.default_backend()
   end
 
   test "detect invalid urls" do
-    assert {:error, :invalid_url} = Down.read("https://")
-    assert {:error, :invalid_url} = Down.read("ftp://elixir-lang.com")
-    assert {:error, :invalid_url} = Down.read("https://elixir-lang.com:66666")
+    assert {:error, %Down.Error{reason: :invalid_url}} = Down.read("https://")
+    assert {:error, %Down.Error{reason: :invalid_url}} = Down.read("ftp://elixir-lang.com")
+
+    assert {:error, %Down.Error{reason: :invalid_url}} =
+             Down.read("https://elixir-lang.com:66666")
+  end
+
+  test "returns invalid URL errors" do
+    assert {:error, %Down.Error{reason: :invalid_url}} = Down.download("foo://example.org")
+
+    # FIXME Some day
+    # assert {:error, :invalid_url} = Down.download("http://example.org\\foo")
   end
 
   test "detect invalid methods" do
-    assert {:error, :invalid_method} = Down.read("https://elixir-lang.com/", method: :load)
+    assert {:error, %Down.Error{reason: :invalid_method}} =
+             Down.read("https://elixir-lang.com/", method: :load)
   end
 
-  # for backend <- [:httpc] do
-  # for backend <- [:ibrowse] do
-  # for backend <- [:hackney] do
-  # for backend <- [:mint] do
-  for backend <- [:hackney, :ibrowse, :httpc, :mint] do
+  # for backend <- [Down.HttpcBackend] do
+  # for backend <- [Down.IBrowseBackend] do
+  # for backend <- [Down.HackneyBackend] do
+  # for backend <- [Down.MintBackend] do
+  for backend <- [Down.HackneyBackend, Down.IBrowseBackend, Down.HttpcBackend, Down.MintBackend] do
     @backend backend
 
     describe "with #{@backend}" do
+      setup do
+        # Needed it because we httpbin fails with too many fast requests
+        Process.sleep(100)
+        :ok
+      end
+
       test "reads" do
         url = "#{@base_url}/bytes/100?seed=0"
         assert {:ok, s} = Down.read(url, backend: @backend)
@@ -295,14 +313,11 @@ defmodule DownTest do
         assert {:ok, download} = Down.download(url, backend: @backend)
         assert "pass word" == download.original_filename
 
-        # FIXME
-        if @backend != :hackney do
-          assert {:ok, download} = Down.download("#{@base_url}/", backend: @backend)
-          refute download.original_filename
+        assert {:ok, download} = Down.download("#{@base_url}/", backend: @backend)
+        refute download.original_filename
 
-          assert {:ok, download} = Down.download("#{@base_url}", backend: @backend)
-          refute download.original_filename
-        end
+        assert {:ok, download} = Down.download("#{@base_url}", backend: @backend)
+        refute download.original_filename
       end
 
       test "returns HTTP error response" do
@@ -315,12 +330,6 @@ defmodule DownTest do
         # FIXME
         # assert {:error, %{response: %{status_code: 100}}} =
         #          Down.download("#{@base_url}/status/100", backend: @backend)
-      end
-
-      test "returns invalid URL errors" do
-        assert {:error, :invalid_url} = Down.download("foo://example.org", backend: @backend)
-        # FIXME Some day
-        # assert {:error, :invalid_url} = Down.download("http://example.org\\foo")
       end
 
       if @backend == :httpc, do: @tag(skip: "doesn't work")

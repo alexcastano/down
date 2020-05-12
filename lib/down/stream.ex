@@ -1,19 +1,19 @@
 defmodule Down.Stream do
-  def new(url, opts) do
+  def new(opts) do
     Stream.resource(
-      fn -> stream_start(url, opts) end,
+      fn -> stream_start(opts) end,
       fn pid -> stream_continue(pid) end,
       fn pid -> stream_stop(pid) end
     )
   end
 
-  defp stream_start(url, opts) do
+  defp stream_start(opts) do
     # FIXME timeout
     # gen_opts = [debug: [:statistics, :trace]]
     # timeout = Map.get(opts, :timeout, 5000)
     # gen_opts = [timeout: timeout, debug: [:statistics, :trace]]
     # gen_opts = [timeout: timeout]
-    child = {Down.Worker, {url, :stream, self(), opts}}
+    child = {Down.Worker, {:stream, self(), opts}}
 
     {:ok, pid} = DynamicSupervisor.start_child(Down.Supervisor, child)
     pid

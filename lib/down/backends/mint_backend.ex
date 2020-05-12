@@ -21,7 +21,6 @@ if Code.ensure_loaded?(Mint.HTTP) do
         recv_timeout: recv_timeout
       } = req
 
-      headers = Map.to_list(headers)
       method = method(method)
 
       transport_opts = [timeout: connect_timeout]
