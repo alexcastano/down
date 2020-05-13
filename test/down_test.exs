@@ -61,12 +61,14 @@ defmodule DownTest do
       test "streams" do
         url = "#{@base_url}/bytes/100?seed=0"
 
-        s =
-          url
-          |> Down.stream(backend: @backend)
-          |> Enum.to_list()
+        assert {:ok, stream} = Down.stream(url, backend: @backend)
 
-        assert [get_binary(url)] == s
+        read =
+          stream
+          |> Enum.to_list()
+          |> IO.iodata_to_binary()
+
+        assert get_binary(url) == read
       end
 
       test "accepts 'get' method" do

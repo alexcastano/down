@@ -56,7 +56,7 @@ defmodule Down do
           method: method(),
           # TODO
           body: term(),
-          headers: map(),
+          headers: list({String.t(), String.t()}),
           backend_opts: term(),
           total_timeout: timeout(),
           connect_timeout: timeout(),
@@ -65,7 +65,7 @@ defmodule Down do
 
   @type response :: %{
           # FIXME headers is a list
-          headers: map(),
+          headers: list({String.t(), String.t()}),
           status_code: nil | non_neg_integer(),
           size: nil | non_neg_integer(),
           encoding: nil | String.t()
@@ -96,11 +96,11 @@ defmodule Down do
 
   The remote connection isn't created until the first chunk is requested.
   """
-  @spec stream(url, opts) :: Stream.t()
+  @spec stream(url, opts) :: {:ok, Stream.t()} | {:error, Down.Error.t()}
   def stream(url, opts \\ %{}) do
     with {:ok, opts} <- Options.build(url, opts) do
       start_fun = fn ->
-        child = {Down.Worker, {:stream, self(), opts}}
+        child = {Down.IO, opts}
         {:ok, pid} = DynamicSupervisor.start_child(Down.Supervisor, child)
         pid
       end
@@ -116,7 +116,7 @@ defmodule Down do
         GenServer.stop(pid)
       end
 
-      Stream.resource(start_fun, next_fun, stop_fun)
+      {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
     end
   end
 
@@ -126,8 +126,17 @@ defmodule Down do
   @doc """
   Returns {:ok, response} if the request is successful, {:error, reason} otherwise.
   """
-  @spec read(url(), opts()) :: String.t()
-  def read(url, opts \\ %{}), do: run(:read, url, opts)
+  @spec read(url(), opts()) :: {:ok, String.t()} | {:error, Down.Error.t()}
+  def read(url, opts \\ %{}) do
+    with {:ok, stream} <- stream(url, opts) do
+      read =
+        stream
+        |> Enum.to_list()
+        |> IO.iodata_to_binary()
+
+      {:ok, read}
+    end
+  end
 
   defp run(operation, url, opts) do
     with {:ok, opts} <- Options.build(url, opts),
