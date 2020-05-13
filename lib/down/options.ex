@@ -36,7 +36,7 @@ defmodule Down.Options do
     options =
       __MODULE__
       |> struct(options)
-      |> Map.put_new_lazy(:backend, &Down.default_backend/0)
+      |> Map.update!(:backend, &(&1 || Down.default_backend()))
 
     with {:ok, url} <- normalize_url(url),
          {:ok, _method} <- validate_method(options.method),

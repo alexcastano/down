@@ -10,8 +10,8 @@ defmodule Down.OptionsTest do
       assert {:ok, options} = Options.build(@valid_url, [])
 
       assert %Down.Options{
-               backend: nil,
-               backend_opts: '',
+               backend: Down.MintBackend,
+               backend_opts: [],
                body: nil,
                connect_timeout: 15000,
                destination: nil,
@@ -43,8 +43,8 @@ defmodule Down.OptionsTest do
       assert {:ok, options} = Options.build("http://url.com", [])
 
       assert %Down.Options{
-               backend: nil,
-               backend_opts: '',
+               backend: Down.MintBackend,
+               backend_opts: [],
                body: nil,
                connect_timeout: 15000,
                destination: nil,

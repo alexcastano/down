@@ -48,7 +48,7 @@ defmodule DownTest do
     describe "with #{@backend}" do
       setup do
         # Needed it because we httpbin fails with too many fast requests
-        Process.sleep(100)
+        # Process.sleep(10)
         :ok
       end
 
@@ -206,7 +206,7 @@ defmodule DownTest do
         assert {:error, _} = Down.download(url, backend: @backend, method: :post)
       end
 
-      if @backend == :httpc, do: @tag(skip: "doesn't work")
+      if @backend == Down.HttpcBackend, do: @tag(skip: "doesn't work")
 
       test "invalid redirects" do
         # redirect to http://localhost:9999/
@@ -332,7 +332,7 @@ defmodule DownTest do
         #          Down.download("#{@base_url}/status/100", backend: @backend)
       end
 
-      if @backend == :httpc, do: @tag(skip: "doesn't work")
+      if @backend == Down.HttpcBackend, do: @tag(skip: "doesn't work")
 
       test "returns connection error" do
         assert {:error, :econnrefused} = Down.download("http://localhost:9999", backend: @backend)

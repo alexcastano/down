@@ -98,8 +98,26 @@ defmodule Down do
   """
   @spec stream(url, opts) :: Stream.t()
   def stream(url, opts \\ %{}) do
-    with {:ok, opts} <- Options.build(url, opts),
-         do: Down.Stream.new(opts)
+    with {:ok, opts} <- Options.build(url, opts) do
+      start_fun = fn ->
+        child = {Down.Worker, {:stream, self(), opts}}
+        {:ok, pid} = DynamicSupervisor.start_child(Down.Supervisor, child)
+        pid
+      end
+
+      next_fun = fn pid ->
+        case GenServer.call(pid, :next_chunk) do
+          :halt -> {:halt, pid}
+          reply -> {[reply], pid}
+        end
+      end
+
+      stop_fun = fn pid ->
+        GenServer.stop(pid)
+      end
+
+      Stream.resource(start_fun, next_fun, stop_fun)
+    end
   end
 
   @spec download(url(), opts()) :: Download.t()
