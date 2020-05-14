@@ -4,32 +4,34 @@ defmodule Down.Options do
   @down_version Mix.Project.config()[:version]
 
   @type t :: %__MODULE__{
-          url: URI.t(),
-          total_timeout: timeout(),
-          recv_timeout: timeout(),
-          connect_timeout: timeout(),
           backend: atom(),
           backend_opts: term(),
           body: term(),
-          method: Down.method(),
+          buffer_size: non_neg_integer(),
+          connect_timeout: timeout(),
+          destination: nil | Path.t(),
           headers: Down.headers(),
           max_redirects: non_neg_integer(),
           max_size: nil | non_neg_integer(),
-          destination: nil | Path.t()
+          method: Down.method(),
+          recv_timeout: timeout(),
+          total_timeout: timeout(),
+          url: URI.t()
         }
 
-  defstruct url: nil,
-            total_timeout: :infinity,
-            recv_timeout: 30_000,
-            connect_timeout: 15_000,
-            backend: nil,
+  defstruct backend: nil,
             backend_opts: [],
             body: nil,
-            method: :get,
+            buffer_size: 100 * 1024,
+            connect_timeout: 15_000,
+            destination: nil,
             headers: [],
             max_redirects: 5,
             max_size: nil,
-            destination: nil
+            method: :get,
+            recv_timeout: 30_000,
+            total_timeout: :infinity,
+            url: nil
 
   @spec build(String.t(), map() | Keyword.t()) :: {:ok, t()} | {:error, Down.Error.t()}
   def build(url, options) do

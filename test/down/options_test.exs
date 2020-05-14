@@ -13,6 +13,7 @@ defmodule Down.OptionsTest do
                backend: Down.MintBackend,
                backend_opts: [],
                body: nil,
+               buffer_size: 102_400,
                connect_timeout: 15000,
                destination: nil,
                headers: [{"User-Agent", "Down/0.0.1"}],

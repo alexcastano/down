@@ -3,15 +3,21 @@ defmodule Down.IO do
 
   alias Down.Options
 
+  # FIXME opaque? or private type
+  @type operation :: :chunk | :status_code
+
   @type state :: %{
           backend: atom(),
           backend_data: term(),
-          buffer: iolist(),
+          buffer: :queue.queue(String.t()),
+          buffer_size: non_neg_integer(),
           current_redirects: integer(),
           destination: nil | String.t(),
           error: nil | term(),
           max_redirects: :infinity | non_neg_integer(),
           max_size: nil | non_neg_integer(),
+          min_buffer_size: non_neg_integer(),
+          pending_replies: :queue.queue({operation(), GenServer.from()}),
           position: non_neg_integer(),
           request: Down.request(),
           response: Down.response(),
@@ -20,10 +26,27 @@ defmodule Down.IO do
 
   use GenServer, restart: :transient
 
+  defguard finished?(state) when :erlang.map_get(:backend_data, state) == nil
+
   def start_link(args) do
     # gen_opts = [debug: [:statistics, :trace]]
     gen_opts = []
     GenServer.start_link(__MODULE__, args, gen_opts)
+  end
+
+  @spec chunk(pid()) :: {:ok, String.t()} | {:ok, :eof} | {:error, any()}
+  def chunk(pid) do
+    GenServer.call(pid, :chunk)
+  end
+
+  @spec status_code(pid()) :: {:ok, integer()} | {:error, any()}
+  def status_code(pid) do
+    GenServer.call(pid, :status_code)
+  end
+
+  @spec close(pid()) :: :ok
+  def close(pid) do
+    GenServer.stop(pid)
   end
 
   @impl true
@@ -34,12 +57,15 @@ defmodule Down.IO do
     state = %{
       backend: opts.backend,
       backend_data: nil,
-      buffer: [],
+      buffer: :queue.new(),
+      buffer_size: 0,
       current_redirects: 0,
       destination: opts.destination,
       error: nil,
       max_redirects: opts.max_redirects,
       max_size: opts.max_size,
+      min_buffer_size: opts.buffer_size,
+      pending_replies: :queue.new(),
       position: 0,
       request: request,
       response: new_response(),
@@ -76,17 +102,39 @@ defmodule Down.IO do
   end
 
   @impl true
-  def handle_call(:next_chunk, _from, %{buffer: [], backend_data: nil} = state) do
-    {:reply, :halt, state}
+  def handle_call(:chunk, _from, state) when finished?(state) do
+    case pop_buffer(state) do
+      :empty -> {:reply, {:ok, :eof}, state}
+      {:value, chunk, state} -> {:reply, {:ok, chunk}, state}
+    end
   end
 
-  def handle_call(:next_chunk, from, %{buffer: []} = state) do
-    {:noreply, %{state | stream_reply_to: from}}
+  def handle_call(:chunk, from, state) do
+    case pop_buffer(state) do
+      :empty ->
+        state = Map.update!(state, :pending_replies, &:queue.in({:chunk, from}, &1))
+        {:noreply, state}
+
+      {:value, chunk, state} ->
+        {:reply, {:ok, chunk}, state}
+    end
   end
 
-  def handle_call(:next_chunk, _from, %{buffer: [head | rest]} = state) do
-    state = maybe_ask_for_next_chunk(%{state | buffer: rest})
-    {:reply, head, state}
+  defp pop_buffer(state) do
+    case :queue.out(state.buffer) do
+      {{:value, chunk}, buffer} ->
+        chunk_size = byte_size(chunk)
+
+        state =
+          state
+          |> Map.put(:buffer, buffer)
+          |> Map.update!(:buffer_size, &(&1 - chunk_size))
+
+        {:value, chunk, state}
+
+      {:empty, _} ->
+        :empty
+    end
   end
 
   @impl true
@@ -100,8 +148,10 @@ defmodule Down.IO do
     |> handle_backend_reply(state)
   end
 
-  defp backend_handle_info(msg, %{backend: backend, backend_data: backend_data}),
-    do: backend.handle_info(backend_data, msg)
+  defp backend_handle_info(msg, %{backend: backend, backend_data: backend_data}) do
+    # IO.inspect({:received_messages, msg})
+    backend.handle_info(backend_data, msg)
+  end
 
   defp handle_backend_reply({:no_parsed, _msg}, state), do: {:noreply, state}
 
@@ -113,7 +163,7 @@ defmodule Down.IO do
          :ok <- verify_max_size(state) do
       state =
         state
-        |> maybe_reply_to_client()
+        |> maybe_reply_to_clients()
         |> maybe_ask_for_next_chunk(force_next_chunk)
 
       {:noreply, state}
@@ -176,7 +226,8 @@ defmodule Down.IO do
       request: build_new_request(state, redirect_url),
       response: new_response(),
       position: 0,
-      buffer: [],
+      buffer: :queue.new(),
+      buffer_size: 0,
       current_redirects: state.current_redirects + 1
     })
   end
@@ -219,30 +270,61 @@ defmodule Down.IO do
     end
   end
 
-  defp maybe_reply_to_client(state = %{stream_reply_to: pid, buffer: [head | tail]})
-       when not is_nil(pid) do
-    GenServer.reply(pid, head)
-    %{state | buffer: tail, stream_reply_to: nil}
+  defp maybe_reply_to_clients(state) do
+    maybe_reply_to_clients(state, %{
+      buffer_empty?: :queue.is_empty(state.buffer),
+      pending_replies_empty?: :queue.is_empty(state.pending_replies)
+    })
   end
 
-  defp maybe_reply_to_client(state = %{stream_reply_to: pid, backend_data: nil, buffer: []})
-       when not is_nil(pid) do
-    GenServer.reply(pid, :halt)
-    %{state | stream_reply_to: nil}
+  defp maybe_reply_to_clients(state, %{pending_replies_empty?: true}) do
+    state
   end
 
-  defp maybe_reply_to_client(state), do: state
+  defp maybe_reply_to_clients(state, %{buffer_empty?: true}) when finished?(state) do
+    :queue.to_list(state.pending_replies)
+    |> Enum.each(fn
+      {:chunk, from} -> GenServer.reply(from, {:ok, :eof})
+    end)
+
+    %{state | pending_replies: :queue.new()}
+  end
+
+  defp maybe_reply_to_clients(state, %{buffer_empty?: true}) do
+    state
+  end
+
+  defp maybe_reply_to_clients(state, _) do
+    {:value, chunk, state} = pop_buffer(state)
+
+    case pop_pending_reply(state) do
+      {:value, :chunk, from, state} ->
+        GenServer.reply(from, {:ok, chunk})
+        maybe_reply_to_clients(state)
+    end
+  end
+
+  defp pop_pending_reply(state) do
+    case :queue.out(state.pending_replies) do
+      {:empty, pending_replies} ->
+        {:empty, %{state | pending_replies: pending_replies}}
+
+      {{:value, {operation, from}}, pending_replies} ->
+        {:value, operation, from, %{state | pending_replies: pending_replies}}
+    end
+  end
 
   @spec maybe_ask_for_next_chunk(state(), :force_next_chunk | :ignore) :: state()
-  defp maybe_ask_for_next_chunk(state, arg \\ :ignore)
+  # defp maybe_ask_for_next_chunk(state, arg \\ :ignore)
 
   defp maybe_ask_for_next_chunk(state, :force_next_chunk),
     do: ask_next_chunk(state)
 
-  defp maybe_ask_for_next_chunk(%{backend_data: nil} = state, _), do: state
+  defp maybe_ask_for_next_chunk(state, _) when finished?(state), do: state
 
-  defp maybe_ask_for_next_chunk(%{buffer: []} = state, _),
-    do: ask_next_chunk(state)
+  defp maybe_ask_for_next_chunk(%{buffer_size: current, min_buffer_size: min} = state, _)
+       when current < min,
+       do: ask_next_chunk(state)
 
   defp maybe_ask_for_next_chunk(state, _), do: state
 
@@ -263,14 +345,8 @@ defmodule Down.IO do
   # Ibrowse return empty chunks sometimes
   defp process_backend_action({:chunk, ""}, state), do: state
 
-  defp process_backend_action({:chunk, chunk}, %{position: position} = state) do
-    with {:ok, state} <- perform_operation(chunk, state) do
-      position = position + byte_size(chunk)
-      %{state | position: position}
-    else
-      {:error, error} ->
-        %{state | error: error}
-    end
+  defp process_backend_action({:chunk, chunk}, state) do
+    add_chunk_to_buffer(state, chunk)
   end
 
   defp process_backend_action({:headers, headers}, state) do
@@ -289,12 +365,13 @@ defmodule Down.IO do
 
   defp process_backend_action({:error, error}, state), do: %{state | error: error}
 
-  defp perform_operation(chunk, %{buffer: []} = state) do
-    {:ok, %{state | buffer: [chunk]}}
-  end
+  defp add_chunk_to_buffer(state, chunk) do
+    chunk_size = byte_size(chunk)
 
-  defp perform_operation(chunk, %{buffer: buffer} = state) do
-    {:ok, %{state | buffer: [buffer, chunk]}}
+    state
+    |> Map.update!(:buffer_size, &(&1 + chunk_size))
+    |> Map.update!(:position, &(&1 + chunk_size))
+    |> Map.update!(:buffer, &:queue.in(chunk, &1))
   end
 
   defp get_size_header(%{"content-length" => size}) when is_binary(size),
@@ -311,7 +388,7 @@ defmodule Down.IO do
     maybe_stop_backend(state)
   end
 
-  defp maybe_stop_backend(%{backend_data: nil} = state), do: state
+  defp maybe_stop_backend(state) when finished?(state), do: state
 
   defp maybe_stop_backend(%{backend: backend, backend_data: backend_data} = state) do
     backend.stop(backend_data)

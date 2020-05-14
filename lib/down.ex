@@ -100,20 +100,20 @@ defmodule Down do
   def stream(url, opts \\ %{}) do
     with {:ok, opts} <- Options.build(url, opts) do
       start_fun = fn ->
-        child = {Down.IO, opts}
-        {:ok, pid} = DynamicSupervisor.start_child(Down.Supervisor, child)
+        {:ok, pid} = Down.IO.start_link(opts)
         pid
       end
 
       next_fun = fn pid ->
-        case GenServer.call(pid, :next_chunk) do
-          :halt -> {:halt, pid}
-          reply -> {[reply], pid}
+        case Down.IO.chunk(pid) do
+          {:ok, :eof} -> {:halt, pid}
+          {:ok, chunk} -> {[chunk], pid}
+          {:error, _} -> {:halt, pid}
         end
       end
 
       stop_fun = fn pid ->
-        GenServer.stop(pid)
+        Down.IO.close(pid)
       end
 
       {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
@@ -135,6 +135,12 @@ defmodule Down do
         |> IO.iodata_to_binary()
 
       {:ok, read}
+    end
+  end
+
+  def open(url, opts \\ []) do
+    with {:ok, opts} <- Options.build(url, opts) do
+      Down.IO.start_link(opts)
     end
   end
 
