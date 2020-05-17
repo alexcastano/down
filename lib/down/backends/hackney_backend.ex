@@ -1,11 +1,14 @@
 if Code.ensure_loaded?(:hackney) do
   defmodule Down.HackneyBackend do
+    alias Down.Backend
+    @behaviour Backend
     @moduledoc false
 
     @type state :: reference()
 
-    @spec run(Down.request(), pid) :: {:ok, state(), Down.request()}
-    def run(req, pid) do
+    @impl true
+    @spec start(Down.request(), pid) :: {:ok, state(), Down.request()}
+    def start(req, pid) do
       %{
         method: method,
         body: body,
@@ -43,34 +46,40 @@ if Code.ensure_loaded?(:hackney) do
       end
     end
 
-    @spec next_chunk(state()) :: state()
-    def next_chunk(ref) do
-      :ok = :hackney.stream_next(ref)
-      ref
+    @impl true
+    @spec demand_next(state()) :: state()
+    def demand_next(ref) do
+      case :hackney.stream_next(ref) do
+        :ok -> ref
+        {:error, :req_not_found} -> ref
+      end
     end
 
-    def handle_info(ref, {:hackney_response, ref, {:status, status, _reason}}) do
-      {:parsed, {:status_code, status}, ref, true}
+    @impl true
+    @spec handle_message(state(), Backend.raw_message()) :: {Backend.action(), state()}
+    def handle_message(ref, {:hackney_response, ref, {:status, status, _reason}}) do
+      {{:status_code, status}, ref}
     end
 
-    def handle_info(ref, {:hackney_response, ref, {:headers, headers}}) do
+    def handle_message(ref, {:hackney_response, ref, {:headers, headers}}) do
       headers = Down.Utils.process_headers(headers)
-      {:parsed, {:headers, headers}, ref, true}
+      {{:headers, headers}, ref}
     end
 
-    def handle_info(ref, {:hackney_response, ref, :done}), do: {:parsed, :done, ref, false}
+    def handle_message(ref, {:hackney_response, ref, :done}), do: {:done, ref}
 
-    def handle_info(ref, {:hackney_response, ref, chunk}) when is_binary(chunk),
-      do: {:parsed, {:chunk, chunk}, ref, false}
+    def handle_message(ref, {:hackney_response, ref, chunk}) when is_binary(chunk),
+      do: {{:chunk, chunk}, ref}
 
-    def handle_info(ref, {:hackney_response, ref, {:see_other, _, _}}),
-      do: {:parsed, :ignore, ref, false}
+    # def handle_message(ref, {:hackney_response, ref, {:see_other, _, _}}),
+    #   do: {:parsed, :ignore, ref}
 
-    def handle_info(ref, {:hackney_response, ref, {:error, {:closed, :timeout}}}),
-      do: {:parsed, {:error, :timeout}, nil, false}
+    def handle_message(ref, {:hackney_response, ref, {:error, {:closed, :timeout}}}),
+      do: {{:error, :timeout}, nil}
 
-    def handle_info(_, msg), do: {:no_parsed, msg}
+    def handle_message(_, msg), do: {:ignored, msg}
 
+    @impl true
     @spec stop(state()) :: :ok
     def stop(ref),
       do: :hackney.close(ref)

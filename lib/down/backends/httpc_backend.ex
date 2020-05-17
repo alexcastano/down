@@ -1,4 +1,6 @@
 defmodule Down.HttpcBackend do
+  alias Down.Backend
+  @behaviour Backend
   @moduledoc false
 
   @type state :: %{
@@ -6,8 +8,9 @@ defmodule Down.HttpcBackend do
           pid: nil | pid()
         }
 
-  @spec run(Down.request(), pid) :: {:ok, state(), Down.request()}
-  def run(req, pid) do
+  @impl true
+  @spec start(Down.request(), pid) :: {:ok, state(), Down.request()}
+  def start(req, pid) do
     %{
       method: method,
       body: body,
@@ -66,50 +69,49 @@ defmodule Down.HttpcBackend do
     for {key, value} <- headers, do: {to_charlist(key), to_charlist(value)}
   end
 
-  @spec next_chunk(state()) :: state()
-  def next_chunk(%{pid: pid} = state) do
+  @impl true
+  @spec demand_next(state()) :: state()
+  def demand_next(%{pid: pid} = state) do
     :ok = :httpc.stream_next(pid)
     state
   end
 
-  def handle_info(%{ref: ref}, {:http, {ref, :stream_start, headers, pid}}) do
+  @impl true
+  @spec handle_message(state(), Backend.raw_message()) :: {Backend.actions(), state()}
+  def handle_message(%{ref: ref}, {:http, {ref, :stream_start, headers, pid}}) do
     headers = Down.Utils.process_headers(headers)
     # We hardcode the status_code, but in fact it could be also 206
-    msgs = [
-      {:headers, headers},
-      {:status_code, 200}
-    ]
-
-    {:parsed, msgs, %{ref: ref, pid: pid}, true}
+    {[{:headers, headers}, {:status_code, 200}], %{ref: ref, pid: pid}}
   end
 
-  def handle_info(%{ref: ref} = bd, {:http, {ref, :stream, chunk}}),
-    do: {:parsed, {:chunk, chunk}, bd, false}
+  def handle_message(%{ref: ref} = bd, {:http, {ref, :stream, chunk}}),
+    do: {{:chunk, chunk}, bd}
 
-  def handle_info(%{ref: ref} = bd, {:http, {ref, :stream_end, _headers}}) do
+  def handle_message(%{ref: ref} = bd, {:http, {ref, :stream_end, _headers}}) do
     # TODO headers
-    {:parsed, :done, bd, false}
+    {:done, bd}
   end
 
   # With errors
-  def handle_info(%{ref: ref}, {:http, {ref, {:error, :timeout}}}),
-    do: {:parsed, {:error, :timeout}, nil, false}
+  def handle_message(%{ref: ref}, {:http, {ref, {:error, :timeout}}}),
+    do: {{:error, :timeout}, nil}
 
-  def handle_info(%{ref: ref} = bd, {:http, {ref, {{_, status_code, _}, headers, body}}}) do
+  def handle_message(%{ref: ref} = bd, {:http, {ref, {{_, status_code, _}, headers, body}}}) do
     headers = Down.Utils.process_headers(headers)
 
     msgs = [
-      {:headers, headers},
       {:status_code, status_code},
+      {:headers, headers},
       {:chunk, body},
       :done
     ]
 
-    {:parsed, msgs, bd, false}
+    {msgs, bd}
   end
 
-  def handle_info(_, msg), do: {:no_parsed, msg}
+  def handle_message(_, msg), do: {:ignored, msg}
 
+  @impl true
   @spec stop(state()) :: :ok
   def stop(%{pid: pid}), do: :httpc.cancel_request(pid)
 end

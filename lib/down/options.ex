@@ -4,7 +4,7 @@ defmodule Down.Options do
   @down_version Mix.Project.config()[:version]
 
   @type t :: %__MODULE__{
-          backend: atom(),
+          backend: Down.Backend.t(),
           backend_opts: term(),
           body: term(),
           buffer_size: non_neg_integer(),

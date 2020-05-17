@@ -56,7 +56,7 @@ defmodule Down do
           method: method(),
           # TODO
           body: term(),
-          headers: list({String.t(), String.t()}),
+          headers: nil | headers,
           backend_opts: term(),
           total_timeout: timeout(),
           connect_timeout: timeout(),
@@ -64,8 +64,7 @@ defmodule Down do
         }
 
   @type response :: %{
-          # FIXME headers is a list
-          headers: list({String.t(), String.t()}),
+          headers: nil | headers,
           status_code: nil | non_neg_integer(),
           size: nil | non_neg_integer(),
           encoding: nil | String.t()
@@ -98,26 +97,24 @@ defmodule Down do
   """
   @spec stream(url, opts) :: {:ok, Stream.t()} | {:error, Down.Error.t()}
   def stream(url, opts \\ %{}) do
-    with {:ok, opts} <- Options.build(url, opts) do
-      start_fun = fn ->
-        {:ok, pid} = Down.IO.start_link(opts)
-        pid
-      end
-
-      next_fun = fn pid ->
-        case Down.IO.chunk(pid) do
-          {:ok, :eof} -> {:halt, pid}
-          {:ok, chunk} -> {[chunk], pid}
-          {:error, _} -> {:halt, pid}
-        end
-      end
-
-      stop_fun = fn pid ->
-        Down.IO.close(pid)
-      end
-
-      {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
+    start_fun = fn ->
+      {:ok, pid} = Down.IO.start_link(url, opts)
+      pid
     end
+
+    next_fun = fn pid ->
+      case Down.IO.chunk(pid) do
+        {:ok, :eof} -> {:halt, pid}
+        {:ok, chunk} -> {[chunk], pid}
+        {:error, _} -> {:halt, pid}
+      end
+    end
+
+    stop_fun = fn pid ->
+      Down.IO.close(pid)
+    end
+
+    {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
   end
 
   @spec download(url(), opts()) :: Download.t()
@@ -139,9 +136,7 @@ defmodule Down do
   end
 
   def open(url, opts \\ []) do
-    with {:ok, opts} <- Options.build(url, opts) do
-      Down.IO.start_link(opts)
-    end
+    Down.IO.start_link(url, opts)
   end
 
   defp run(operation, url, opts) do

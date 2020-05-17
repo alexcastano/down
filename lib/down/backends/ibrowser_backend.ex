@@ -1,8 +1,13 @@
 if Code.ensure_loaded?(:ibrowse) do
   defmodule Down.IBrowseBackend do
-    @moduledoc false
+    alias Down.Backend
+    @behaviour Backend
 
-    def run(req, pid) do
+    @type state() :: :ibrowse.req_id()
+
+    @impl true
+    @spec start(Down.request(), pid()) :: {:ok, state(), Down.request()} | {:error, term()}
+    def start(req, pid) do
       %{
         method: method,
         body: body,
@@ -41,34 +46,40 @@ if Code.ensure_loaded?(:ibrowse) do
       end
     end
 
-    def next_chunk(id) do
+    @impl true
+    @spec demand_next(state()) :: state()
+    def demand_next(id) do
       :ok = :ibrowse.stream_next(id)
       id
     end
 
-    def handle_info(id, {:ibrowse_async_response_timeout, id}),
-      do: {:parsed, {:error, :timeout}, id, false}
+    @impl true
+    @spec handle_message(state(), Backend.raw_message()) :: {Backend.action(), state()}
+    def handle_message(id, {:ibrowse_async_response_timeout, id}),
+      do: {{:error, :timeout}, id}
 
-    def handle_info(id, {:ibrowse_async_headers, id, status_code, headers}) do
+    def handle_message(id, {:ibrowse_async_headers, id, status_code, headers}) do
       {status_code, []} = :string.to_integer(status_code)
       headers = Down.Utils.process_headers(headers)
 
-      {:parsed, [{:status_code, status_code}, {:headers, headers}], id, false}
+      {[{:status_code, status_code}, {:headers, headers}], id}
     end
 
-    def handle_info(id, {:ibrowse_async_response, id, {:error, :req_timedout}}),
-      do: {:parsed, {:error, :timeout}, nil, false}
+    def handle_message(id, {:ibrowse_async_response, id, {:error, :req_timedout}}),
+      do: {{:error, :timeout}, nil}
 
-    def handle_info(id, {:ibrowse_async_response, id, {:error, error}}),
-      do: {:parsed, {:error, error}, id, false}
+    def handle_message(id, {:ibrowse_async_response, id, {:error, error}}),
+      do: {{:error, error}, id}
 
-    def handle_info(id, {:ibrowse_async_response, id, chunk}),
-      do: {:parsed, {:chunk, chunk}, id, false}
+    def handle_message(id, {:ibrowse_async_response, id, chunk}),
+      do: {{:chunk, chunk}, id}
 
-    def handle_info(id, {:ibrowse_async_response_end, id}), do: {:parsed, :done, id, false}
+    def handle_message(id, {:ibrowse_async_response_end, id}), do: {:done, id}
 
-    def handle_info(_, msg), do: {:no_parsed, msg}
+    def handle_message(_, msg), do: {:ignored, msg}
 
+    @impl true
+    @spec stop(state()) :: :ok
     def stop(id), do: :ok = :ibrowse.stream_close(id)
   end
 end

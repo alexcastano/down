@@ -1,4 +1,4 @@
-defmodule ExDown.MixProject do
+defmodule Down.MixProject do
   use Mix.Project
 
   def project do
@@ -7,6 +7,7 @@ defmodule ExDown.MixProject do
       version: "0.0.1",
       elixir: "~> 1.6",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       dialyzer: dialyzer(),
       deps: deps(),
       docs: docs()
@@ -20,6 +21,9 @@ defmodule ExDown.MixProject do
       mod: {Down.Application, []}
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
 
   defp dialyzer() do
     [
@@ -48,7 +52,8 @@ defmodule ExDown.MixProject do
       {:benchee, "~> 1.0.0", only: :dev},
       {:tesla, "~> 1.3.3", only: :dev},
       # {:sweet_xml, ">= 0.0.0"},
-      {:dialyxir, "~> 1.0", only: [:dev], runtime: false},
+      {:dialyxir, "~> 1.0", only: :dev, runtime: false},
+      {:bypass, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}
     ]
   end

@@ -4,34 +4,57 @@ defmodule Down.IO do
   alias Down.Options
 
   # FIXME opaque? or private type
-  @type operation :: :chunk | :status_code
+  @type operation :: :chunk | :status_code | :resp_headers
+  @type operation_request :: {operation, GenServer.from()}
+  @type status ::
+          :connecting
+          | :redirecting
+          | :getting_headers
+          | :getting_body
+          | :completed
+          | :cancelled
+          | :error
 
   @type state :: %{
-          backend: atom(),
+          backend: Down.Backend.t(),
           backend_data: term(),
           buffer: :queue.queue(String.t()),
           buffer_size: non_neg_integer(),
           current_redirects: integer(),
+          demanded_next?: boolean(),
           destination: nil | String.t(),
           error: nil | term(),
           max_redirects: :infinity | non_neg_integer(),
           max_size: nil | non_neg_integer(),
           min_buffer_size: non_neg_integer(),
-          pending_replies: :queue.queue({operation(), GenServer.from()}),
+          pending_data_replies: :queue.queue(operation_request()),
+          pending_info_replies: list(),
           position: non_neg_integer(),
           request: Down.request(),
           response: Down.response(),
-          stream_reply_to: nil | GenServer.from()
+          status: status()
         }
 
   use GenServer, restart: :transient
 
   defguard finished?(state) when :erlang.map_get(:backend_data, state) == nil
 
-  def start_link(args) do
-    # gen_opts = [debug: [:statistics, :trace]]
-    gen_opts = []
-    GenServer.start_link(__MODULE__, args, gen_opts)
+  def start_link(url, opts \\ []) do
+    with {:ok, opts} <- Options.build(url, opts) do
+      # gen_opts = [debug: [:statistics, :trace]]
+      gen_opts = []
+      GenServer.start_link(__MODULE__, opts, gen_opts)
+    end
+  end
+
+  @spec status_code(pid()) :: {:ok, integer()} | {:error, any()}
+  def status_code(pid) do
+    GenServer.call(pid, :status_code)
+  end
+
+  @spec resp_headers(pid()) :: {:ok, Down.headers()} | {:error, any()}
+  def resp_headers(pid) do
+    GenServer.call(pid, :resp_headers)
   end
 
   @spec chunk(pid()) :: {:ok, String.t()} | {:ok, :eof} | {:error, any()}
@@ -39,9 +62,9 @@ defmodule Down.IO do
     GenServer.call(pid, :chunk)
   end
 
-  @spec status_code(pid()) :: {:ok, integer()} | {:error, any()}
-  def status_code(pid) do
-    GenServer.call(pid, :status_code)
+  @spec cancel(pid()) :: :ok
+  def cancel(pid) do
+    GenServer.call(pid, :cancel)
   end
 
   @spec close(pid()) :: :ok
@@ -60,16 +83,18 @@ defmodule Down.IO do
       buffer: :queue.new(),
       buffer_size: 0,
       current_redirects: 0,
+      demanded_next?: false,
       destination: opts.destination,
       error: nil,
       max_redirects: opts.max_redirects,
       max_size: opts.max_size,
       min_buffer_size: opts.buffer_size,
-      pending_replies: :queue.new(),
+      pending_data_replies: :queue.new(),
+      pending_info_replies: [],
       position: 0,
       request: request,
       response: new_response(),
-      stream_reply_to: nil
+      status: :connecting
     }
 
     {:ok, state, {:continue, :start}}
@@ -77,7 +102,7 @@ defmodule Down.IO do
 
   @impl true
   def handle_continue(:start, state) do
-    with {:ok, backend_data, request} <- state.backend.run(state.request, self()) do
+    with {:ok, backend_data, request} <- state.backend.start(state.request, self()) do
       {:noreply, %{state | backend_data: backend_data, request: request}}
     else
       {:error, reason} -> {:stop, :normal, %{state | error: reason}}
@@ -85,7 +110,7 @@ defmodule Down.IO do
   end
 
   @spec new_response() :: Down.response()
-  defp new_response(), do: %{headers: [], status_code: nil, size: nil, encoding: nil}
+  defp new_response(), do: %{headers: nil, status_code: nil, size: nil, encoding: nil}
 
   @spec build_req(Options.t()) :: Down.request()
   defp build_req(opts) do
@@ -102,6 +127,33 @@ defmodule Down.IO do
   end
 
   @impl true
+  def handle_call(:status_code, from, %{response: %{status_code: nil}} = state) do
+    state =
+      state
+      |> add_pending_info_reply({:status_code, from})
+      |> maybe_demand_next()
+
+    {:noreply, state}
+  end
+
+  def handle_call(:status_code, _from, %{response: %{status_code: status}} = state) do
+    {:reply, {:ok, status}, state}
+  end
+
+  @impl true
+  def handle_call(:resp_headers, from, %{response: %{headers: nil}} = state) do
+    state =
+      state
+      |> add_pending_info_reply({:resp_headers, from})
+      |> maybe_demand_next()
+
+    {:noreply, state}
+  end
+
+  def handle_call(:resp_headers, _from, %{response: %{headers: resp_headers}} = state) do
+    {:reply, {:ok, resp_headers}, state}
+  end
+
   def handle_call(:chunk, _from, state) when finished?(state) do
     case pop_buffer(state) do
       :empty -> {:reply, {:ok, :eof}, state}
@@ -112,12 +164,35 @@ defmodule Down.IO do
   def handle_call(:chunk, from, state) do
     case pop_buffer(state) do
       :empty ->
-        state = Map.update!(state, :pending_replies, &:queue.in({:chunk, from}, &1))
+        state =
+          state
+          |> append_pending_reply({:chunk, from})
+          |> maybe_demand_next()
+
         {:noreply, state}
 
       {:value, chunk, state} ->
-        {:reply, {:ok, chunk}, state}
+        {:reply, {:ok, chunk}, maybe_demand_next(state)}
     end
+  end
+
+  def handle_call(:cancel, _from, state) do
+    state =
+      state
+      |> maybe_stop_backend()
+      |> maybe_reply_to_clients()
+
+    {:reply, :ok, state}
+  end
+
+  @spec add_pending_info_reply(state(), operation_request()) :: state()
+  def add_pending_info_reply(state, operation) do
+    Map.update!(state, :pending_info_replies, &[operation | &1])
+  end
+
+  @spec append_pending_reply(state(), operation_request()) :: state()
+  defp append_pending_reply(state, request) do
+    Map.update!(state, :pending_data_replies, &:queue.in(request, &1))
   end
 
   defp pop_buffer(state) do
@@ -144,19 +219,18 @@ defmodule Down.IO do
 
   def handle_info(msg, state) do
     msg
-    |> backend_handle_info(state)
-    |> handle_backend_reply(state)
+    |> backend_handle_message(state)
+    |> handle_backend_actions(state)
   end
 
-  defp backend_handle_info(msg, %{backend: backend, backend_data: backend_data}) do
-    # IO.inspect({:received_messages, msg})
-    backend.handle_info(backend_data, msg)
+  defp backend_handle_message(msg, %{backend: backend, backend_data: backend_data}) do
+    backend.handle_message(backend_data, msg)
   end
 
-  defp handle_backend_reply({:no_parsed, _msg}, state), do: {:noreply, state}
+  defp handle_backend_actions({action, backend_data}, state) do
+    state = %{state | demanded_next?: false, backend_data: backend_data}
 
-  defp handle_backend_reply({:parsed, action, backend_data, force_next_chunk}, state) do
-    state = process_backend_action(action, %{state | backend_data: backend_data})
+    state = process_backend_action(action, state)
 
     with :ok <- verify_no_errors(state),
          :ok <- verify_no_redirect(state),
@@ -164,7 +238,7 @@ defmodule Down.IO do
       state =
         state
         |> maybe_reply_to_clients()
-        |> maybe_ask_for_next_chunk(force_next_chunk)
+        |> maybe_demand_next()
 
       {:noreply, state}
     end
@@ -215,7 +289,7 @@ defmodule Down.IO do
   defp maybe_follow_redirect(%{backend: backend} = state) do
     with {:ok, redirect_url} <- build_redirect_url(state),
          state = build_redirected_state(state, redirect_url),
-         {:ok, backend_data, request} <- backend.run(state.request, self()) do
+         {:ok, backend_data, request} <- backend.start(state.request, self()) do
       {:ok, %{state | request: request, backend_data: backend_data}}
     end
   end
@@ -271,76 +345,126 @@ defmodule Down.IO do
   end
 
   defp maybe_reply_to_clients(state) do
-    maybe_reply_to_clients(state, %{
-      buffer_empty?: :queue.is_empty(state.buffer),
-      pending_replies_empty?: :queue.is_empty(state.pending_replies)
-    })
+    state
+    |> maybe_reply_info_to_clients()
+    |> maybe_reply_data_to_clients()
   end
 
-  defp maybe_reply_to_clients(state, %{pending_replies_empty?: true}) do
+  defp maybe_reply_info_to_clients(%{pending_info_replies: []} = state) do
     state
   end
 
-  defp maybe_reply_to_clients(state, %{buffer_empty?: true}) when finished?(state) do
-    :queue.to_list(state.pending_replies)
+  defp maybe_reply_info_to_clients(state) do
+    Map.update!(state, :pending_info_replies, fn pendings ->
+      Enum.filter(pendings, fn
+        {:status_code, from} ->
+          if state.response.status_code do
+            GenServer.reply(from, {:ok, state.response.status_code})
+            false
+          else
+            true
+          end
+
+        {:resp_headers, from} ->
+          if state.response.headers do
+            GenServer.reply(from, {:ok, state.response.headers})
+            false
+          else
+            true
+          end
+      end)
+    end)
+  end
+
+  defp maybe_reply_data_to_clients(state) do
+    maybe_reply_data_to_clients(
+      state,
+      %{
+        buffer_empty?: :queue.is_empty(state.buffer),
+        pending_replies_empty?: :queue.is_empty(state.pending_data_replies)
+      }
+    )
+  end
+
+  defp maybe_reply_data_to_clients(state, %{pending_replies_empty?: true}) do
+    state
+  end
+
+  defp maybe_reply_data_to_clients(state, %{buffer_empty?: true}) when finished?(state) do
+    :queue.to_list(state.pending_data_replies)
     |> Enum.each(fn
-      {:chunk, from} -> GenServer.reply(from, {:ok, :eof})
+      {:chunk, from} ->
+        GenServer.reply(from, {:ok, :eof})
     end)
 
-    %{state | pending_replies: :queue.new()}
+    %{state | pending_data_replies: :queue.new()}
   end
 
-  defp maybe_reply_to_clients(state, %{buffer_empty?: true}) do
+  defp maybe_reply_data_to_clients(state, %{buffer_empty?: true}) do
     state
   end
 
-  defp maybe_reply_to_clients(state, _) do
+  defp maybe_reply_data_to_clients(state, _) do
     {:value, chunk, state} = pop_buffer(state)
 
     case pop_pending_reply(state) do
       {:value, :chunk, from, state} ->
         GenServer.reply(from, {:ok, chunk})
-        maybe_reply_to_clients(state)
+        maybe_reply_data_to_clients(state)
     end
   end
 
   defp pop_pending_reply(state) do
-    case :queue.out(state.pending_replies) do
-      {:empty, pending_replies} ->
-        {:empty, %{state | pending_replies: pending_replies}}
+    state
+    |> Map.fetch!(:pending_data_replies)
+    |> :queue.out()
+    |> case do
+      {:empty, pendings} ->
+        {:empty, %{state | pending_data_replies: pendings}}
 
-      {{:value, {operation, from}}, pending_replies} ->
-        {:value, operation, from, %{state | pending_replies: pending_replies}}
+      {{:value, {operation, from}}, pendings} ->
+        {:value, operation, from, %{state | pending_data_replies: pendings}}
     end
   end
 
-  @spec maybe_ask_for_next_chunk(state(), :force_next_chunk | :ignore) :: state()
-  # defp maybe_ask_for_next_chunk(state, arg \\ :ignore)
+  @spec maybe_demand_next(state()) :: state()
+  defp maybe_demand_next(state) when finished?(state), do: state
 
-  defp maybe_ask_for_next_chunk(state, :force_next_chunk),
-    do: ask_next_chunk(state)
+  defp maybe_demand_next(%{demanded_next?: true} = state), do: state
 
-  defp maybe_ask_for_next_chunk(state, _) when finished?(state), do: state
-
-  defp maybe_ask_for_next_chunk(%{buffer_size: current, min_buffer_size: min} = state, _)
-       when current < min,
-       do: ask_next_chunk(state)
-
-  defp maybe_ask_for_next_chunk(state, _), do: state
-
-  @spec ask_next_chunk(state()) :: state()
-  defp ask_next_chunk(state = %{backend: backend, backend_data: backend_data}) do
-    backend_data = backend.next_chunk(backend_data)
-    %{state | backend_data: backend_data}
+  defp maybe_demand_next(%{buffer_size: current, min_buffer_size: min} = state)
+       when current < min do
+    demand_next(state)
   end
 
+  defp maybe_demand_next(state) do
+    cond do
+      pending_replies?(state) -> demand_next(state)
+      true -> state
+    end
+  end
+
+  defp pending_replies?(state) do
+    !:queue.is_empty(state.pending_data_replies) ||
+      !Enum.empty?(state.pending_info_replies)
+  end
+
+  @spec demand_next(state()) :: state()
+  defp demand_next(state = %{backend: backend, backend_data: backend_data}) do
+    backend_data = backend.demand_next(backend_data)
+    %{state | backend_data: backend_data, demanded_next?: true}
+  end
+
+  @spec process_backend_action(Down.Backend.actions(), state()) :: state()
   defp process_backend_action(actions, state) when is_list(actions) do
     Enum.reduce(actions, state, &process_backend_action/2)
   end
 
-  defp process_backend_action(:ignore, state), do: state
+  defp process_backend_action({:ignore, _}, state), do: state
 
-  defp process_backend_action(:done, state), do: %{state | backend_data: nil}
+  defp process_backend_action(:done, state) do
+    %{state | backend_data: nil}
+  end
 
   # Ibrowse return empty chunks sometimes
   defp process_backend_action({:chunk, ""}, state), do: state
@@ -354,6 +478,7 @@ defmodule Down.IO do
     encoding = get_encoding_header(headers)
 
     state
+    # FIXME headers can be later too?
     |> put_in([:response, :headers], headers)
     |> put_in([:response, :size], size)
     |> put_in([:response, :encoding], encoding)

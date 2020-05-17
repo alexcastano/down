@@ -1,5 +1,7 @@
 if Code.ensure_loaded?(Mint.HTTP) do
   defmodule Down.MintBackend do
+    alias Down.Backend
+    @behaviour Down.Backend
     @moduledoc false
 
     @type state :: %{
@@ -8,8 +10,9 @@ if Code.ensure_loaded?(Mint.HTTP) do
             recv_timeout: timeout()
           }
 
-    @spec run(Down.request(), pid) :: {:ok, state(), Down.request()}
-    def run(req, _pid) do
+    @impl true
+    @spec start(Down.request(), pid) :: {:ok, state(), Down.request()}
+    def start(req, _pid) do
       %{
         method: method,
         body: body,
@@ -34,12 +37,11 @@ if Code.ensure_loaded?(Mint.HTTP) do
 
       with {:ok, conn} <- Mint.HTTP.connect(scheme, host, port, opts),
            {:ok, conn, request_ref} <- Mint.HTTP.request(conn, method, path, headers, body) do
-        state =
-          next_chunk(%{
-            conn: conn,
-            request_ref: request_ref,
-            recv_timeout: recv_timeout
-          })
+        state = %{
+          conn: conn,
+          request_ref: request_ref,
+          recv_timeout: recv_timeout
+        }
 
         {:ok, state, req}
       else
@@ -57,23 +59,33 @@ if Code.ensure_loaded?(Mint.HTTP) do
 
     defp method(method), do: method |> Atom.to_string() |> String.upcase()
 
-    @spec next_chunk(state()) :: state()
-    def next_chunk(state) do
-      case Mint.HTTP.recv(state.conn, 0, state.recv_timeout) do
-        {:ok, conn, responses} ->
-          send(self(), responses)
-          %{state | conn: conn}
+    @impl true
+    @spec demand_next(state()) :: state()
+    def demand_next(state) do
+      pid = self()
 
-        {:error, conn, %{reason: reason}, responses} ->
-          responses = [{:error, state.request_ref, reason} | responses]
-          send(self(), responses)
-          %{state | conn: conn}
+      if Mint.HTTP.open?(state.conn) do
+        spawn_link(fn ->
+          case Mint.HTTP.recv(state.conn, 0, state.recv_timeout) do
+            {:ok, conn, responses} ->
+              send(pid, {conn, responses})
+
+            {:error, conn, %{reason: reason}, responses} ->
+              responses = [{:error, state.request_ref, reason} | responses]
+              send(pid, {conn, responses})
+          end
+        end)
       end
+
+      state
     end
 
-    def handle_info(ret, messages) do
-      actions = Enum.map(messages, &handle_mint_msg(&1, ret.request_ref))
-      {:parsed, actions, ret, false}
+    @impl true
+    @spec handle_message(state(), Backend.raw_message()) :: {Backend.actions(), state()}
+    def handle_message(state, {conn, messages}) do
+      state = %{state | conn: conn}
+      actions = Enum.map(messages, &handle_mint_msg(&1, state.request_ref))
+      {actions, state}
     end
 
     def handle_mint_msg({:status, request_ref, status}, request_ref),
@@ -92,9 +104,10 @@ if Code.ensure_loaded?(Mint.HTTP) do
       do: {:error, reason}
 
     def handle_mint_msg(_ret, :unknown, msg) do
-      {:no_parsed, msg}
+      {:ignored, msg}
     end
 
+    @impl true
     @spec stop(state()) :: :ok
     def stop(%{conn: conn}) do
       Mint.HTTP.close(conn)
