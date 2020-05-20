@@ -81,7 +81,7 @@ defmodule Down.HttpcBackend do
   def handle_message(%{ref: ref}, {:http, {ref, :stream_start, headers, pid}}) do
     headers = Down.Utils.process_headers(headers)
     # We hardcode the status_code, but in fact it could be also 206
-    {[{:headers, headers}, {:status_code, 200}], %{ref: ref, pid: pid}}
+    {[{:status_code, 200}, {:headers, headers}], %{ref: ref, pid: pid}}
   end
 
   def handle_message(%{ref: ref} = bd, {:http, {ref, :stream, chunk}}),

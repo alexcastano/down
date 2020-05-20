@@ -15,7 +15,7 @@ defmodule Down.IOTest do
 
     status_msg = {:status_code, status_code}
     headers_msg = {:headers, headers}
-    send(pid, [status_msg, headers_msg])
+    TestBackend.fake_message(pid, [status_msg, headers_msg])
 
     assert_receive {TestBackend, :handle_message, ^status_msg}
     assert_receive {TestBackend, :handle_message, ^headers_msg}
@@ -24,7 +24,7 @@ defmodule Down.IOTest do
 
   defp send_chunk(pid, chunk) do
     msg = {:chunk, chunk}
-    send(pid, msg)
+    TestBackend.fake_message(pid, msg)
     assert_receive {TestBackend, :handle_message, ^msg}
   end
 
@@ -60,17 +60,46 @@ defmodule Down.IOTest do
 
   describe "status_code/1" do
     test "works", %{opts: opts} do
-      opts = [{:buffer_size, 0} | opts]
       pid = open(opts, 203)
-      assert {:ok, 203} = Down.IO.status_code(pid)
-      assert :ok = Down.IO.cancel(pid)
-      assert {:ok, 203} = Down.IO.status_code(pid)
+      assert 203 == Down.IO.status_code(pid)
+      assert :ok == Down.IO.cancel(pid)
+      assert 203 == Down.IO.status_code(pid)
     end
 
-    test "returns cancelled" do
+    test "returns nil when cancelled before getting it", %{opts: opts} do
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :status_requested)
+        assert nil == Down.IO.resp_headers(pid)
+        send(parent, :status_received)
+      end)
+
+      assert_receive :status_requested
+      assert :ok == Down.IO.cancel(pid)
+      assert nil == Down.IO.status_code(pid)
+
+      assert_receive :status_received
     end
 
-    test "returns errors" do
+    test "returns nil when errors", %{opts: opts} do
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :status_requested)
+        assert nil == Down.IO.resp_headers(pid)
+        send(parent, :status_received)
+      end)
+
+      assert_receive :status_requested
+      TestBackend.fake_message(pid, {:error, :unknown})
+      assert nil == Down.IO.status_code(pid)
+
+      assert_receive :status_received
     end
 
     test "with buffer_size: 0, demands chunks when it is needed", %{opts: opts} do
@@ -82,35 +111,92 @@ defmodule Down.IOTest do
       parent = self()
 
       spawn(fn ->
-        assert {:ok, 200} = Down.IO.status_code(pid)
+        assert 200 = Down.IO.status_code(pid)
         send(parent, :status_received)
       end)
 
       refute_receive :status_received
       assert_received {TestBackend, :demand_next}
 
-      send(pid, {:status_code, 200})
+      TestBackend.fake_message(pid, {:status_code, 200})
       assert_receive :status_received
 
-      assert {:ok, 200} = Down.IO.status_code(pid)
+      assert 200 = Down.IO.status_code(pid)
       refute_received {TestBackend, :demand_next}
-
-      Down.IO.close(pid)
     end
 
     test "responds as soon as possible", %{opts: opts} do
-      opts
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+      assert_receive {TestBackend, :start}
+      refute_receive {TestBackend, :demand_next}
+
+      parent = self()
+
+      spawn(fn ->
+        assert Down.IO.chunk(pid)
+        send(parent, :chunk_received)
+      end)
+
+      assert_receive {TestBackend, :demand_next}
+
+      spawn(fn ->
+        assert 200 = Down.IO.status_code(pid)
+        send(parent, :status_received)
+      end)
+
+      refute_receive {TestBackend, :demand_next}
+
+      TestBackend.fake_message(pid, {:status_code, 200})
+      assert_receive :status_received
+
+      refute_receive :chunk_received
     end
   end
 
   describe "resp_headers/1" do
     test "works", %{opts: opts} do
+      headers = [{"foo", "bar"}]
+      pid = open(opts, 203, headers)
+      assert headers == Down.IO.resp_headers(pid)
+      assert :ok == Down.IO.cancel(pid)
+      assert headers == Down.IO.resp_headers(pid)
     end
 
-    test "returns cancelled" do
+    test "returns nil when cancelled before getting it", %{opts: opts} do
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :headers_requested)
+        assert nil == Down.IO.resp_headers(pid)
+        send(parent, :headers_received)
+      end)
+
+      assert_receive :headers_requested
+      assert :ok == Down.IO.cancel(pid)
+      assert nil == Down.IO.resp_headers(pid)
+
+      assert_receive :headers_received
     end
 
-    test "returns errors" do
+    test "returns nil when errors", %{opts: opts} do
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :headers_requested)
+        assert nil == Down.IO.resp_headers(pid)
+        send(parent, :headers_received)
+      end)
+
+      assert_receive :headers_requested
+
+      TestBackend.fake_message(pid, {:error, :unknown})
+      assert nil == Down.IO.resp_headers(pid)
+
+      assert_receive :headers_received
     end
 
     test "with buffer_size: 0, demands with resp_headers/1", %{opts: opts} do
@@ -122,28 +208,49 @@ defmodule Down.IOTest do
       parent = self()
 
       spawn(fn ->
-        assert {:ok, []} = Down.IO.resp_headers(pid)
+        assert [] = Down.IO.resp_headers(pid)
         send(parent, :headers_received)
       end)
 
       refute_receive :headers_received
       assert_received {TestBackend, :demand_next}
 
-      send(pid, {:status_code, 200})
+      TestBackend.fake_message(pid, {:status_code, 200})
       assert_receive {TestBackend, :handle_message, {:status_code, 200}}
       assert_receive {TestBackend, :demand_next}
       refute_receive :headers_received
 
-      send(pid, {:headers, []})
+      TestBackend.fake_message(pid, {:headers, []})
       assert_receive :headers_received
 
       refute_received {TestBackend, :demand_next}
-
-      Down.IO.close(pid)
     end
 
     test "responds as soon as possible", %{opts: opts} do
-      opts
+      assert {:ok, pid} = Down.open("http://localhost/", opts)
+      assert_receive {TestBackend, :start}
+      refute_receive {TestBackend, :demand_next}
+
+      parent = self()
+
+      spawn(fn ->
+        assert Down.IO.chunk(pid)
+        send(parent, :chunk_received)
+      end)
+
+      assert_receive {TestBackend, :demand_next}
+
+      spawn(fn ->
+        assert [] = Down.IO.resp_headers(pid)
+        send(parent, :headers_received)
+      end)
+
+      refute_receive {TestBackend, :demand_next}
+
+      TestBackend.fake_message(pid, status_code: 200, headers: [])
+      assert_receive :headers_received
+
+      refute_receive :chunk_received
     end
   end
 
@@ -164,70 +271,77 @@ defmodule Down.IOTest do
       refute_receive :chunk_received
       assert_receive {TestBackend, :demand_next}
 
-      send(pid, {:status_code, 200})
+      TestBackend.fake_message(pid, {:status_code, 200})
       assert_receive {TestBackend, :handle_message, {:status_code, 200}}
       assert_receive {TestBackend, :demand_next}
       refute_receive :chunk_received
 
-      send(pid, {:headers, []})
+      TestBackend.fake_message(pid, {:headers, []})
       assert_receive {TestBackend, :handle_message, {:headers, []}}
       assert_receive {TestBackend, :demand_next}
       refute_receive :chunk_received
 
-      send(pid, {:chunk, "chunk"})
+      TestBackend.fake_message(pid, {:chunk, "chunk"})
       assert_receive {TestBackend, :handle_message, {:chunk, "chunk"}}
       assert_receive :chunk_received
       refute_receive {TestBackend, :demand_next}
-
-      Down.IO.close(pid)
     end
 
-    test "demands chunks until buffer size is achieve", %{opts: opts} do
-      opts = [{:buffer_size, 3} | opts]
-      pid = open(opts)
-      assert_receive {TestBackend, :demand_next}
-
-      send_chunk(pid, "1")
-      assert_receive {TestBackend, :demand_next}
-
-      send_chunk(pid, "2")
-      assert_receive {TestBackend, :demand_next}
-
-      send_chunk(pid, "3")
-      refute_receive {TestBackend, :demand_next}
+    test "returns nil when cancelled before getting it", %{opts: opts} do
+      assert pid = open(opts)
 
       parent = self()
 
       spawn(fn ->
-        assert {:ok, "1"} = Down.IO.chunk(pid)
+        send(parent, :chunk_requested)
+        assert nil == Down.IO.chunk(pid)
         send(parent, :chunk_received)
       end)
 
+      assert_receive :chunk_requested
+
+      assert :ok == Down.IO.cancel(pid)
+      assert nil == Down.IO.chunk(pid)
+
       assert_receive :chunk_received
-      assert_received {TestBackend, :demand_next}
-
-      send_chunk(pid, "456")
-      refute_receive {TestBackend, :demand_next}
-
-      assert {:ok, "2"} = Down.IO.chunk(pid)
-      refute_receive {TestBackend, :demand_next}
-
-      assert {:ok, "3"} = Down.IO.chunk(pid)
-      refute_receive {TestBackend, :demand_next}
-
-      assert {:ok, "456"} = Down.IO.chunk(pid)
-      assert_received {TestBackend, :demand_next}
-
-      Down.IO.close(pid)
     end
 
-    test "returns cancelled" do
+    test "returns nil when errors", %{opts: opts} do
+      assert pid = open(opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :chunk_requested)
+        assert nil == Down.IO.chunk(pid)
+        send(parent, :chunk_received)
+      end)
+
+      assert_receive :chunk_requested
+
+      TestBackend.fake_message(pid, {:error, :unknown})
+      assert nil == Down.IO.chunk(pid)
+
+      assert_receive :chunk_received
     end
 
-    test "returns errors" do
-    end
+    test "returns :eof", %{opts: opts} do
+      assert pid = open(opts)
 
-    test "returns :eof" do
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :chunk_requested)
+        assert :eof == Down.IO.chunk(pid)
+        send(parent, :chunk_received)
+      end)
+
+      assert_receive :chunk_requested
+
+      TestBackend.fake_message(pid, :done)
+      assert :eof == Down.IO.chunk(pid)
+
+      assert_receive :chunk_received
     end
   end
 
@@ -277,8 +391,45 @@ defmodule Down.IOTest do
     {:ok, pid} = Down.open("http://localhost/", opts)
     assert_receive {TestBackend, :start}
 
-    send(pid, :done)
+    TestBackend.fake_message(pid, :done)
     assert_receive {TestBackend, :handle_message, :done}
     refute_receive {TestBackend, :stop}
+  end
+
+  test "demands chunks until buffer size is achieve", %{opts: opts} do
+    opts = [{:buffer_size, 3} | opts]
+    pid = open(opts)
+    assert_receive {TestBackend, :demand_next}
+
+    send_chunk(pid, "1")
+    assert_receive {TestBackend, :demand_next}
+
+    send_chunk(pid, "2")
+    assert_receive {TestBackend, :demand_next}
+
+    send_chunk(pid, "3")
+    refute_receive {TestBackend, :demand_next}
+
+    parent = self()
+
+    spawn(fn ->
+      assert "1" = Down.IO.chunk(pid)
+      send(parent, :chunk_received)
+    end)
+
+    assert_receive :chunk_received
+    assert_received {TestBackend, :demand_next}
+
+    send_chunk(pid, "456")
+    refute_receive {TestBackend, :demand_next}
+
+    assert "2" = Down.IO.chunk(pid)
+    refute_receive {TestBackend, :demand_next}
+
+    assert "3" = Down.IO.chunk(pid)
+    refute_receive {TestBackend, :demand_next}
+
+    assert "456" = Down.IO.chunk(pid)
+    assert_received {TestBackend, :demand_next}
   end
 end

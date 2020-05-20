@@ -4,6 +4,10 @@ defmodule Down.TestBackend do
 
   @type state() :: pid()
 
+  def fake_message(pid, message) do
+    send(pid, message)
+  end
+
   @impl true
   @spec start(Down.request(), pid()) :: {:ok, state(), Down.request()} | {:error, term()}
   def start(request, _pid) do

@@ -9,8 +9,7 @@ defmodule Down.IO do
   @type status ::
           :connecting
           | :redirecting
-          | :getting_headers
-          | :getting_body
+          | :streaming
           | :completed
           | :cancelled
           | :error
@@ -37,7 +36,8 @@ defmodule Down.IO do
 
   use GenServer, restart: :transient
 
-  defguard finished?(state) when :erlang.map_get(:backend_data, state) == nil
+  defguard finished?(state)
+           when :erlang.map_get(:status, state) in [:completed, :cancelled, :error]
 
   def start_link(url, opts \\ []) do
     with {:ok, opts} <- Options.build(url, opts) do
@@ -47,17 +47,17 @@ defmodule Down.IO do
     end
   end
 
-  @spec status_code(pid()) :: {:ok, integer()} | {:error, any()}
+  @spec status_code(pid()) :: integer() | nil
   def status_code(pid) do
     GenServer.call(pid, :status_code)
   end
 
-  @spec resp_headers(pid()) :: {:ok, Down.headers()} | {:error, any()}
+  @spec resp_headers(pid()) :: Down.headers() | nil
   def resp_headers(pid) do
     GenServer.call(pid, :resp_headers)
   end
 
-  @spec chunk(pid()) :: {:ok, String.t()} | {:ok, :eof} | {:error, any()}
+  @spec chunk(pid()) :: String.t() | :eof | nil
   def chunk(pid) do
     GenServer.call(pid, :chunk)
   end
@@ -127,6 +127,10 @@ defmodule Down.IO do
   end
 
   @impl true
+  def handle_call(:status_code, _from, state) when finished?(state) do
+    {:reply, state.response.status_code, state}
+  end
+
   def handle_call(:status_code, from, %{response: %{status_code: nil}} = state) do
     state =
       state
@@ -137,10 +141,14 @@ defmodule Down.IO do
   end
 
   def handle_call(:status_code, _from, %{response: %{status_code: status}} = state) do
-    {:reply, {:ok, status}, state}
+    {:reply, status, state}
   end
 
   @impl true
+  def handle_call(:resp_headers, _from, state) when finished?(state) do
+    {:reply, state.response.headers, state}
+  end
+
   def handle_call(:resp_headers, from, %{response: %{headers: nil}} = state) do
     state =
       state
@@ -151,12 +159,17 @@ defmodule Down.IO do
   end
 
   def handle_call(:resp_headers, _from, %{response: %{headers: resp_headers}} = state) do
-    {:reply, {:ok, resp_headers}, state}
+    {:reply, resp_headers, state}
+  end
+
+  def handle_call(:chunk, _from, %{status: status} = state)
+      when status in [:cancelled, :error] do
+    {:reply, nil, state}
   end
 
   def handle_call(:chunk, _from, state) when finished?(state) do
     case pop_buffer(state) do
-      :empty -> {:reply, {:ok, :eof}, state}
+      :empty -> {:reply, :eof, state}
       {:value, chunk, state} -> {:reply, {:ok, chunk}, state}
     end
   end
@@ -172,29 +185,15 @@ defmodule Down.IO do
         {:noreply, state}
 
       {:value, chunk, state} ->
-        {:reply, {:ok, chunk}, maybe_demand_next(state)}
+        {:reply, chunk, maybe_demand_next(state)}
     end
   end
 
   def handle_call(:cancel, _from, state) do
-    state =
-      state
-      |> maybe_stop_backend()
-      |> maybe_reply_to_clients()
-
-    {:reply, :ok, state}
+    {:reply, :ok, cancel(state, :cancelled)}
   end
 
-  @spec add_pending_info_reply(state(), operation_request()) :: state()
-  def add_pending_info_reply(state, operation) do
-    Map.update!(state, :pending_info_replies, &[operation | &1])
-  end
-
-  @spec append_pending_reply(state(), operation_request()) :: state()
-  defp append_pending_reply(state, request) do
-    Map.update!(state, :pending_data_replies, &:queue.in(request, &1))
-  end
-
+  @spec pop_buffer(state()) :: {:value, binary(), state()} | :empty
   defp pop_buffer(state) do
     case :queue.out(state.buffer) do
       {{:value, chunk}, buffer} ->
@@ -212,9 +211,43 @@ defmodule Down.IO do
     end
   end
 
+  defp cancel(state, :cancelled) do
+    state
+    |> set_status(:cancelled)
+    |> maybe_stop_backend()
+    |> maybe_reply_to_clients()
+  end
+
+  defp cancel(state, {:error, error}) do
+    state
+    |> set_status(:error)
+    |> Map.put(:error, error)
+    |> maybe_stop_backend()
+    |> maybe_reply_to_clients()
+  end
+
+  @spec set_status(state(), status()) :: state()
+  defp set_status(state, status) do
+    Map.put(state, :status, status)
+  end
+
+  @spec add_pending_info_reply(state(), operation_request()) :: state()
+  def add_pending_info_reply(state, operation) do
+    Map.update!(state, :pending_info_replies, &[operation | &1])
+  end
+
+  @spec append_pending_reply(state(), operation_request()) :: state()
+  defp append_pending_reply(state, request) do
+    Map.update!(state, :pending_data_replies, &:queue.in(request, &1))
+  end
+
   @impl true
   def handle_info(:timeout, state) do
     {:stop, :normal, %{state | error: :timeout}}
+  end
+
+  def handle_info(_msg, state) when finished?(state) do
+    {:noreply, state}
   end
 
   def handle_info(msg, state) do
@@ -232,11 +265,10 @@ defmodule Down.IO do
 
     state = process_backend_action(action, state)
 
-    with :ok <- verify_no_errors(state),
-         :ok <- verify_no_redirect(state),
-         :ok <- verify_max_size(state) do
+    with :ok <- verify_no_redirect(state) do
       state =
         state
+        |> verify_max_size()
         |> maybe_reply_to_clients()
         |> maybe_demand_next()
 
@@ -244,23 +276,15 @@ defmodule Down.IO do
     end
   end
 
-  @spec verify_no_errors(state()) :: :ok | {:stop, :normal, state()}
-  defp verify_no_errors(%{error: nil}), do: :ok
-  defp verify_no_errors(state), do: {:stop, :normal, state}
-
-  @spec verify_max_size(state()) :: :ok | {:stop, :normal, state()}
-  defp verify_max_size(%{max_size: nil}), do: :ok
+  @spec verify_max_size(state()) :: state()
+  defp verify_max_size(%{max_size: nil} = state), do: state
 
   defp verify_max_size(state = %{position: current_size, max_size: max_size})
        when is_integer(current_size) and current_size > max_size do
-    {:stop, :normal, %{state | error: :too_large}}
+    cancel(state, {:error, :too_large})
   end
 
-  # defp verify_max_size(state) %{"content-length" => size}, %{max_size: max_size}) do
-  #   if String.to_integer(size) > max_size, do: {:error, :too_large}, else: :ok
-  # end
-
-  defp verify_max_size(_), do: :ok
+  defp verify_max_size(state), do: state
 
   @redirect_status [301, 302, 303, 307, 308]
 
@@ -272,21 +296,21 @@ defmodule Down.IO do
        when status in @redirect_status do
     state
     |> maybe_stop_backend()
-    |> maybe_follow_redirect()
+    |> follow_redirect()
     |> case do
       {:ok, state} -> {:noreply, state}
-      {:error, error} -> {:stop, :normal, %{state | error: error}}
+      {:error, error} -> cancel(state, {:error, error})
     end
   end
 
   defp verify_no_redirect(_), do: :ok
 
-  @spec maybe_follow_redirect(state) :: {:ok, state()} | {:error, term()}
-  defp maybe_follow_redirect(%{current_redirects: c, max_redirects: m})
+  @spec follow_redirect(state) :: {:ok, state()} | {:error, term()}
+  defp follow_redirect(%{current_redirects: c, max_redirects: m})
        when m != :infinite and c >= m,
        do: {:error, :too_many_redirects}
 
-  defp maybe_follow_redirect(%{backend: backend} = state) do
+  defp follow_redirect(%{backend: backend} = state) do
     with {:ok, redirect_url} <- build_redirect_url(state),
          state = build_redirected_state(state, redirect_url),
          {:ok, backend_data, request} <- backend.start(state.request, self()) do
@@ -302,7 +326,8 @@ defmodule Down.IO do
       position: 0,
       buffer: :queue.new(),
       buffer_size: 0,
-      current_redirects: state.current_redirects + 1
+      current_redirects: state.current_redirects + 1,
+      status: :redirecting
     })
   end
 
@@ -354,12 +379,21 @@ defmodule Down.IO do
     state
   end
 
+  defp maybe_reply_info_to_clients(state) when finished?(state) do
+    Enum.each(state.pending_info_replies, fn
+      {:status_code, from} -> GenServer.reply(from, state.response.status_code)
+      {:resp_headers, from} -> GenServer.reply(from, state.response.headers)
+    end)
+
+    %{state | pending_info_replies: []}
+  end
+
   defp maybe_reply_info_to_clients(state) do
     Map.update!(state, :pending_info_replies, fn pendings ->
       Enum.filter(pendings, fn
         {:status_code, from} ->
           if state.response.status_code do
-            GenServer.reply(from, {:ok, state.response.status_code})
+            GenServer.reply(from, state.response.status_code)
             false
           else
             true
@@ -367,7 +401,7 @@ defmodule Down.IO do
 
         {:resp_headers, from} ->
           if state.response.headers do
-            GenServer.reply(from, {:ok, state.response.headers})
+            GenServer.reply(from, state.response.headers)
             false
           else
             true
@@ -390,12 +424,17 @@ defmodule Down.IO do
     state
   end
 
+  defp maybe_reply_data_to_clients(%{status: status} = state, %{buffer_empty?: true})
+       when status in [:cancelled, :error] do
+    :queue.to_list(state.pending_data_replies)
+    |> Enum.each(fn {:chunk, from} -> GenServer.reply(from, nil) end)
+
+    %{state | pending_data_replies: :queue.new()}
+  end
+
   defp maybe_reply_data_to_clients(state, %{buffer_empty?: true}) when finished?(state) do
     :queue.to_list(state.pending_data_replies)
-    |> Enum.each(fn
-      {:chunk, from} ->
-        GenServer.reply(from, {:ok, :eof})
-    end)
+    |> Enum.each(fn {:chunk, from} -> GenServer.reply(from, :eof) end)
 
     %{state | pending_data_replies: :queue.new()}
   end
@@ -463,14 +502,17 @@ defmodule Down.IO do
   defp process_backend_action({:ignore, _}, state), do: state
 
   defp process_backend_action(:done, state) do
-    %{state | backend_data: nil}
+    state
+    |> Map.put(:backend_data, nil)
+    |> set_status(:completed)
   end
 
   # Ibrowse return empty chunks sometimes
   defp process_backend_action({:chunk, ""}, state), do: state
 
   defp process_backend_action({:chunk, chunk}, state) do
-    add_chunk_to_buffer(state, chunk)
+    state
+    |> add_chunk_to_buffer(chunk)
   end
 
   defp process_backend_action({:headers, headers}, state) do
@@ -485,10 +527,16 @@ defmodule Down.IO do
   end
 
   defp process_backend_action({:status_code, status_code}, state) do
-    put_in(state, [:response, :status_code], status_code)
+    state
+    |> put_in([:response, :status_code], status_code)
+    |> set_status(:streaming)
   end
 
-  defp process_backend_action({:error, error}, state), do: %{state | error: error}
+  defp process_backend_action({:error, error}, state) do
+    state
+    |> Map.put(:error, error)
+    |> set_status(:error)
+  end
 
   defp add_chunk_to_buffer(state, chunk) do
     chunk_size = byte_size(chunk)
@@ -513,7 +561,7 @@ defmodule Down.IO do
     maybe_stop_backend(state)
   end
 
-  defp maybe_stop_backend(state) when finished?(state), do: state
+  defp maybe_stop_backend(%{backend_data: nil} = state), do: state
 
   defp maybe_stop_backend(%{backend: backend, backend_data: backend_data} = state) do
     backend.stop(backend_data)
