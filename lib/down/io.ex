@@ -14,31 +14,50 @@ defmodule Down.IO do
           | :cancelled
           | :error
 
+  @type redirection :: %{
+          url: Down.url(),
+          status_code: non_neg_integer(),
+          headers: Down.headers()
+        }
+
   @type state :: %{
           backend: Down.Backend.t(),
           backend_data: term(),
           buffer: :queue.queue(String.t()),
           buffer_size: non_neg_integer(),
-          current_redirects: integer(),
           demanded_next?: boolean(),
-          destination: nil | String.t(),
           error: nil | term(),
-          max_redirects: :infinity | non_neg_integer(),
+          max_redirections: :infinity | non_neg_integer(),
           max_size: nil | non_neg_integer(),
           min_buffer_size: non_neg_integer(),
           pending_data_replies: :queue.queue(operation_request()),
           pending_info_replies: list(),
           position: non_neg_integer(),
+          redirections: [redirection()],
           request: Down.request(),
           response: Down.response(),
           status: status()
         }
+
+  @type info_request :: :status | :buffer_size
+  @info_request [
+    :buffer_size,
+    :error,
+    :max_redirections,
+    :min_buffer_size,
+    :position,
+    :redirections,
+    :request,
+    :response,
+    :status
+  ]
 
   use GenServer, restart: :transient
 
   defguard finished?(state)
            when :erlang.map_get(:status, state) in [:completed, :cancelled, :error]
 
+  # @spec start_link(String.t(), Keyword.t()) :: GenServer.on_start()
   def start_link(url, opts \\ []) do
     with {:ok, opts} <- Options.build(url, opts) do
       # gen_opts = [debug: [:statistics, :trace]]
@@ -72,6 +91,16 @@ defmodule Down.IO do
     GenServer.stop(pid)
   end
 
+  def info(pid, request) when request in @info_request do
+    GenServer.call(pid, {:info, request})
+  end
+
+  # TODO TESTS
+  def info(pid, requests) when is_list(requests) do
+    Enum.each(requests, &(&1 in @info_request || raise(ArgumentError, inspect(&1))))
+    GenServer.call(pid, {:info, requests})
+  end
+
   @impl true
   @spec init(Options.t()) :: {:ok, state(), {:continue, :start}}
   def init(%Options{} = opts) do
@@ -82,16 +111,15 @@ defmodule Down.IO do
       backend_data: nil,
       buffer: :queue.new(),
       buffer_size: 0,
-      current_redirects: 0,
       demanded_next?: false,
-      destination: opts.destination,
       error: nil,
-      max_redirects: opts.max_redirects,
+      max_redirections: opts.max_redirections,
       max_size: opts.max_size,
       min_buffer_size: opts.buffer_size,
       pending_data_replies: :queue.new(),
       pending_info_replies: [],
       position: 0,
+      redirections: [],
       request: request,
       response: new_response(),
       status: :connecting
@@ -102,10 +130,16 @@ defmodule Down.IO do
 
   @impl true
   def handle_continue(:start, state) do
-    with {:ok, backend_data, request} <- state.backend.start(state.request, self()) do
-      {:noreply, %{state | backend_data: backend_data, request: request}}
+    with {:ok, state} <- start_backend(state) do
+      {:noreply, state}
     else
       {:error, reason} -> {:stop, :normal, %{state | error: reason}}
+    end
+  end
+
+  defp start_backend(state) do
+    with {:ok, backend_data, request} <- state.backend.start(state.request, self()) do
+      {:ok, %{state | backend_data: backend_data, request: request}}
     end
   end
 
@@ -170,7 +204,7 @@ defmodule Down.IO do
   def handle_call(:chunk, _from, state) when finished?(state) do
     case pop_buffer(state) do
       :empty -> {:reply, :eof, state}
-      {:value, chunk, state} -> {:reply, {:ok, chunk}, state}
+      {:value, chunk, state} -> {:reply, chunk, state}
     end
   end
 
@@ -187,6 +221,18 @@ defmodule Down.IO do
       {:value, chunk, state} ->
         {:reply, chunk, maybe_demand_next(state)}
     end
+  end
+
+  def handle_call({:info, :status}, _from, state) do
+    {:reply, state.status, state}
+  end
+
+  def handle_call({:info, :buffer_size}, _from, state) do
+    {:reply, state.buffer_size, state}
+  end
+
+  def handle_call({:info, :error}, _from, state) do
+    {:reply, state.error, state}
   end
 
   def handle_call(:cancel, _from, state) do
@@ -265,14 +311,18 @@ defmodule Down.IO do
 
     state = process_backend_action(action, state)
 
-    with :ok <- verify_no_redirect(state) do
-      state =
-        state
-        |> verify_max_size()
-        |> maybe_reply_to_clients()
-        |> maybe_demand_next()
+    case maybe_redirect(state) do
+      {:break, state} ->
+        {:noreply, state}
 
-      {:noreply, state}
+      :no_redirect ->
+        state =
+          state
+          |> verify_max_size()
+          |> maybe_reply_to_clients()
+          |> maybe_demand_next()
+
+        {:noreply, state}
     end
   end
 
@@ -288,47 +338,56 @@ defmodule Down.IO do
 
   @redirect_status [301, 302, 303, 307, 308]
 
-  @spec verify_no_redirect(state()) :: :ok | {:noreply, state} | {:stop, :normal, state}
-  # defp verify_no_redirect(%{response: %{headers: []}}), do: :ok
-  defp verify_no_redirect(%{response: %{headers: headers}}) when headers == %{}, do: :ok
+  @spec maybe_redirect(state()) :: :no_redirect | {:break, state}
+  defp maybe_redirect(%{response: %{headers: headers}}) when headers == [], do: :no_redirect
 
-  defp verify_no_redirect(%{response: %{status_code: status}} = state)
+  defp maybe_redirect(%{response: %{status_code: status}} = state)
        when status in @redirect_status do
     state
     |> maybe_stop_backend()
-    |> follow_redirect()
+    |> maybe_follow_redirect()
     |> case do
-      {:ok, state} -> {:noreply, state}
-      {:error, error} -> cancel(state, {:error, error})
+      {:ok, state} -> {:break, state}
+      {:error, error} -> {:break, cancel(state, {:error, error})}
     end
   end
 
-  defp verify_no_redirect(_), do: :ok
+  defp maybe_redirect(_), do: :no_redirect
 
   @spec follow_redirect(state) :: {:ok, state()} | {:error, term()}
-  defp follow_redirect(%{current_redirects: c, max_redirects: m})
-       when m != :infinite and c >= m,
-       do: {:error, :too_many_redirects}
+  defp maybe_follow_redirect(state) do
+    if length(state.redirections) >= state.max_redirections do
+      {:error, :too_many_redirects}
+    else
+      follow_redirect(state)
+    end
+  end
 
-  defp follow_redirect(%{backend: backend} = state) do
+  defp follow_redirect(state) do
     with {:ok, redirect_url} <- build_redirect_url(state),
          state = build_redirected_state(state, redirect_url),
-         {:ok, backend_data, request} <- backend.start(state.request, self()) do
-      {:ok, %{state | request: request, backend_data: backend_data}}
+         {:ok, state} <- start_backend(state) do
+      {:ok, state}
     end
   end
 
   @spec build_redirected_state(state(), String.t()) :: state()
   defp build_redirected_state(state, redirect_url) do
+    redirection = %{
+      status_code: state.response.status_code,
+      headers: state.response.headers,
+      url: state.request.url
+    }
+
     Map.merge(state, %{
       request: build_new_request(state, redirect_url),
       response: new_response(),
       position: 0,
       buffer: :queue.new(),
       buffer_size: 0,
-      current_redirects: state.current_redirects + 1,
       status: :redirecting
     })
+    |> Map.update!(:redirections, &[redirection | &1])
   end
 
   @spec build_new_request(state(), String.t()) :: Down.request()
@@ -352,11 +411,13 @@ defmodule Down.IO do
   end
 
   defp build_redirect_url(%{request: %{url: current_url}, response: %{headers: headers}}) do
-    case headers["location"] do
+    headers
+    |> List.keyfind("location", 0)
+    |> case do
       nil ->
         {:error, :invalid_redirect}
 
-      redirect_url ->
+      {"location", redirect_url} ->
         case URI.parse(redirect_url) do
           # relative redirect
           %{host: host, scheme: scheme} when is_nil(host) or is_nil(scheme) ->
@@ -448,7 +509,7 @@ defmodule Down.IO do
 
     case pop_pending_reply(state) do
       {:value, :chunk, from, state} ->
-        GenServer.reply(from, {:ok, chunk})
+        GenServer.reply(from, chunk)
         maybe_reply_data_to_clients(state)
     end
   end

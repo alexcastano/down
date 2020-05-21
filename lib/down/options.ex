@@ -9,14 +9,13 @@ defmodule Down.Options do
           body: term(),
           buffer_size: non_neg_integer(),
           connect_timeout: timeout(),
-          destination: nil | Path.t(),
           headers: Down.headers(),
-          max_redirects: non_neg_integer(),
+          max_redirections: non_neg_integer(),
           max_size: nil | non_neg_integer(),
           method: Down.method(),
           recv_timeout: timeout(),
           total_timeout: timeout(),
-          url: URI.t()
+          url: String.t()
         }
 
   defstruct backend: nil,
@@ -24,9 +23,8 @@ defmodule Down.Options do
             body: nil,
             buffer_size: 100 * 1024,
             connect_timeout: 15_000,
-            destination: nil,
             headers: [],
-            max_redirects: 5,
+            max_redirections: 5,
             max_size: nil,
             method: :get,
             recv_timeout: 30_000,

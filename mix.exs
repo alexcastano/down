@@ -17,8 +17,7 @@ defmodule Down.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
-      mod: {Down.Application, []}
+      extra_applications: [:logger]
     ]
   end
 
@@ -48,10 +47,8 @@ defmodule Down.MixProject do
       {:hackney, "~> 1.15", optional: true},
       {:castore, "~> 0.1", optional: true},
       {:mint, "~> 1.0", optional: true},
-      {:jason, "~> 1.1", only: :test},
       {:benchee, "~> 1.0.0", only: :dev},
       {:tesla, "~> 1.3.3", only: :dev},
-      # {:sweet_xml, ">= 0.0.0"},
       {:dialyxir, "~> 1.0", only: :dev, runtime: false},
       {:bypass, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}

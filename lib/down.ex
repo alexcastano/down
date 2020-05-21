@@ -43,8 +43,6 @@ defmodule Down do
     :infinity will wait indefinitely. The default is 15_000.
   """
 
-  alias Down.Options
-
   @type url :: String.t()
   @type opts :: map() | Keyword.t()
   @type header :: {String.t(), String.t()}
@@ -96,7 +94,7 @@ defmodule Down do
   The remote connection isn't created until the first chunk is requested.
   """
   @spec stream(url, opts) :: {:ok, Stream.t()} | {:error, Down.Error.t()}
-  def stream(url, opts \\ %{}) do
+  def stream(url, opts \\ []) do
     start_fun = fn ->
       {:ok, pid} = Down.IO.start_link(url, opts)
       pid
@@ -104,9 +102,9 @@ defmodule Down do
 
     next_fun = fn pid ->
       case Down.IO.chunk(pid) do
-        {:ok, :eof} -> {:halt, pid}
-        {:ok, chunk} -> {[chunk], pid}
-        {:error, _} -> {:halt, pid}
+        :eof -> {:halt, pid}
+        nil -> {:halt, pid}
+        chunk -> {[chunk], pid}
       end
     end
 
@@ -117,8 +115,8 @@ defmodule Down do
     {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
   end
 
-  @spec download(url(), opts()) :: Download.t()
-  def download(url, opts \\ %{}), do: run(:download, url, opts)
+  # @spec download(url(), opts()) :: Download.t()
+  # def download(url, opts \\ %{}), do: run(:download, url, opts)
 
   @doc """
   Returns {:ok, response} if the request is successful, {:error, reason} otherwise.
@@ -137,30 +135,5 @@ defmodule Down do
 
   def open(url, opts \\ []) do
     Down.IO.start_link(url, opts)
-  end
-
-  defp run(operation, url, opts) do
-    with {:ok, opts} <- Options.build(url, opts),
-         timeout = opts.total_timeout,
-         args = {operation, self(), opts},
-         child = {Down.Worker, args},
-         {:ok, pid} <- DynamicSupervisor.start_child(Down.Supervisor, child) do
-      ref = Process.monitor(pid)
-
-      receive do
-        {Down.Worker, ^pid, reply} ->
-          Process.demonitor(ref, [:flush])
-          reply
-
-        {:DOWN, ^ref, _, _proc, reason} ->
-          Process.demonitor(ref, [:flush])
-          {:error, reason}
-      after
-        timeout ->
-          Process.demonitor(ref, [:flush])
-          Process.exit(pid, :normal)
-          {:error, :timeout}
-      end
-    end
   end
 end
