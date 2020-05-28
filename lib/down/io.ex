@@ -39,7 +39,19 @@ defmodule Down.IO do
           status: status()
         }
 
-  @type info_request :: :status | :buffer_size
+  @type info_request ::
+          :buffer_size
+          | :content_length
+          | :content_type
+          | :error
+          | :max_redirections
+          | :min_buffer_size
+          | :position
+          | :redirections
+          | :request
+          | :response
+          | :status
+
   @info_request [
     :buffer_size,
     :content_length,
