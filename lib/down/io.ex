@@ -42,6 +42,8 @@ defmodule Down.IO do
   @type info_request :: :status | :buffer_size
   @info_request [
     :buffer_size,
+    :content_length,
+    :content_type,
     :error,
     :max_redirections,
     :min_buffer_size,
@@ -57,38 +59,43 @@ defmodule Down.IO do
   defguard finished?(state)
            when :erlang.map_get(:status, state) in [:completed, :cancelled, :error]
 
-  # @spec start_link(String.t(), Keyword.t()) :: GenServer.on_start()
+  @spec start_link(String.t(), Keyword.t()) :: GenServer.on_start()
   def start_link(url, opts \\ []) do
     with {:ok, opts} <- Options.build(url, opts) do
-      # gen_opts = [debug: [:statistics, :trace]]
+      # Maybe get this from opts?
       gen_opts = []
       GenServer.start_link(__MODULE__, opts, gen_opts)
     end
   end
 
-  @spec status_code(pid()) :: integer() | nil
+  @spec status_code(GenServer.server()) :: integer() | nil
   def status_code(pid) do
     GenServer.call(pid, :status_code)
   end
 
-  @spec resp_headers(pid()) :: Down.headers() | nil
+  @spec resp_headers(GenServer.server()) :: Down.headers() | nil
   def resp_headers(pid) do
     GenServer.call(pid, :resp_headers)
   end
 
-  @spec chunk(pid()) :: String.t() | :eof | nil
+  @spec chunk(GenServer.server()) :: String.t() | :eof | nil
   def chunk(pid) do
     GenServer.call(pid, :chunk)
   end
 
-  @spec cancel(pid()) :: :ok
+  @spec cancel(GenServer.server()) :: :ok
   def cancel(pid) do
     GenServer.call(pid, :cancel)
   end
 
-  @spec close(pid()) :: :ok
+  @spec close(GenServer.server()) :: :ok
   def close(pid) do
     GenServer.stop(pid)
+  end
+
+  @spec flush(GenServer.server()) :: [String.t()]
+  def flush(pid) do
+    GenServer.call(pid, :flush)
   end
 
   def info(pid, request) when request in @info_request do
@@ -223,20 +230,69 @@ defmodule Down.IO do
     end
   end
 
-  def handle_call({:info, :status}, _from, state) do
-    {:reply, state.status, state}
+  def handle_call(:flush, _from, state) do
+    chunks = :queue.to_list(state.buffer)
+    {:reply, chunks, %{state | buffer: :queue.new()}}
+  end
+
+  def handle_call(:cancel, _from, state) do
+    {:reply, :ok, cancel(state, :cancelled)}
   end
 
   def handle_call({:info, :buffer_size}, _from, state) do
     {:reply, state.buffer_size, state}
   end
 
+  def handle_call({:info, :content_length}, _from, state) do
+    {:reply, state.response.size, state}
+  end
+
+  def handle_call({:info, :content_type}, _from, state) do
+    {:reply, state.response.encoding, state}
+  end
+
   def handle_call({:info, :error}, _from, state) do
     {:reply, state.error, state}
   end
 
-  def handle_call(:cancel, _from, state) do
-    {:reply, :ok, cancel(state, :cancelled)}
+  def handle_call({:info, :max_redirections}, _from, state) do
+    {:reply, state.max_redirections, state}
+  end
+
+  def handle_call({:info, :min_buffer_size}, _from, state) do
+    {:reply, state.min_buffer_size, state}
+  end
+
+  def handle_call({:info, :position}, _from, state) do
+    {:reply, state.position, state}
+  end
+
+  def handle_call({:info, :redirections}, _from, state) do
+    {:reply, state.redirections, state}
+  end
+
+  def handle_call({:info, :request}, _from, state) do
+    request = Map.take(state.request, [:url, :method, :headers])
+    {:reply, request, state}
+  end
+
+  def handle_call({:info, :response}, _from, state) do
+    request = Map.take(state.response, [:status_code, :size, :encoding, :headers])
+    {:reply, request, state}
+  end
+
+  def handle_call({:info, :status}, _from, state) do
+    {:reply, state.status, state}
+  end
+
+  def handle_call({:info, list}, _from, state) do
+    {state, results} =
+      Enum.reduce(list, {state, []}, fn req, {state, results} ->
+        {:reply, result, state} = handle_call({:info, req}, nil, state)
+        {state, [result | results]}
+      end)
+
+    {:reply, Enum.reverse(results), state}
   end
 
   @spec pop_buffer(state()) :: {:value, binary(), state()} | :empty
@@ -608,13 +664,15 @@ defmodule Down.IO do
     |> Map.update!(:buffer, &:queue.in(chunk, &1))
   end
 
-  defp get_size_header(%{"content-length" => size}) when is_binary(size),
-    do: String.to_integer(size)
+  defp get_size_header(headers) do
+    case List.keyfind(headers, "content-length", 0) do
+      nil -> nil
+      {"content-length", int} when is_integer(int) -> int
+      {"content-length", bin} when is_binary(bin) -> String.to_integer(bin)
+    end
+  end
 
-  defp get_size_header(%{"content-length" => size}) when is_integer(size), do: size
-  defp get_size_header(_), do: nil
-
-  # defp get_encoding_header(%{"content-type" => size}) when is_integer(size), do: size
+  # TODO
   defp get_encoding_header(_), do: nil
 
   @impl true
