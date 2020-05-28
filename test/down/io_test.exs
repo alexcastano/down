@@ -346,13 +346,40 @@ defmodule Down.IOTest do
   end
 
   describe "cancel/1" do
-    test "set status to :cancelled" do
+    test "set status to :cancelled", %{opts: opts} do
+      pid = open(opts)
+      assert :ok == Down.IO.cancel(pid)
+      assert :cancelled == Down.IO.info(pid, :status)
     end
 
-    test "replies pending requests" do
+    test "replies pending requests", %{opts: opts} do
+      assert pid = open(opts)
+
+      parent = self()
+
+      spawn(fn ->
+        send(parent, :chunk_requested)
+        assert nil == Down.IO.chunk(pid)
+        send(parent, :chunk_received)
+      end)
+
+      assert_receive :chunk_requested
+
+      assert :ok == Down.IO.cancel(pid)
+
+      assert_receive :chunk_received
     end
 
-    test "doesn't handle more backend messages" do
+    test "doesn't handle more backend messages", %{opts: opts} do
+      assert pid = open(opts)
+
+      assert :ok == Down.IO.cancel(pid)
+      assert_receive {TestBackend, :demand_next}
+      assert_receive {TestBackend, :stop}
+
+      msg = {:chunk, "chunk"}
+      TestBackend.fake_message(pid, msg)
+      refute_receive {TestBackend, :handle_message, ^msg}
     end
   end
 
