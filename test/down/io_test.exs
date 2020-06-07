@@ -5,8 +5,7 @@ defmodule Down.IOTest do
 
   setup do
     opts = [backend: TestBackend, backend_opts: self()]
-    bypass = Bypass.open()
-    {:ok, bypass: bypass, opts: opts}
+    {:ok, opts: opts}
   end
 
   defp open(opts, status_code \\ 200, headers \\ []) do
@@ -26,19 +25,6 @@ defmodule Down.IOTest do
     msg = {:chunk, chunk}
     TestBackend.fake_message(pid, msg)
     assert_receive {TestBackend, :handle_message, ^msg}
-  end
-
-  defmacro assert_next_receive(pattern, timeout \\ 100) do
-    quote do
-      receive do
-        message ->
-          assert unquote(pattern) = message
-      after
-        unquote(timeout) ->
-          # you might want to raise a better message here
-          raise "timeout"
-      end
-    end
   end
 
   describe "start_link/2" do
@@ -258,7 +244,7 @@ defmodule Down.IOTest do
     test "with buffer_size: 0 demands with chunk/1", %{opts: opts} do
       opts = [{:buffer_size, 0} | opts]
       assert {:ok, pid} = Down.open("http://localhost/", opts)
-      assert_next_receive({TestBackend, :start})
+      assert_receive {TestBackend, :start}
       refute_receive {TestBackend, :demand_next}
 
       parent = self()
@@ -349,7 +335,7 @@ defmodule Down.IOTest do
     test "set status to :cancelled", %{opts: opts} do
       pid = open(opts)
       assert :ok == Down.IO.cancel(pid)
-      assert :cancelled == Down.IO.info(pid, :status)
+      assert {:status, :cancelled} == Down.IO.info(pid, :status)
     end
 
     test "replies pending requests", %{opts: opts} do
@@ -430,7 +416,7 @@ defmodule Down.IOTest do
       pid = open(opts)
       assert Process.alive?(pid)
       assert :ok = Down.IO.close(pid)
-      assert_next_receive({TestBackend, :stop})
+      assert_receive {TestBackend, :stop}
       refute Process.alive?(pid)
     end
   end
@@ -438,29 +424,29 @@ defmodule Down.IOTest do
   describe "info/2" do
     test "with :buffer_size", %{opts: opts} do
       pid = open(opts)
-      assert 0 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 0} == Down.IO.info(pid, :buffer_size)
 
       TestBackend.fake_message(pid, {:chunk, "chunk"})
-      assert 5 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 5} == Down.IO.info(pid, :buffer_size)
 
       TestBackend.fake_message(pid, {:chunk, "chunk"})
-      assert 10 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 10} == Down.IO.info(pid, :buffer_size)
 
       assert "chunk" == Down.IO.chunk(pid)
-      assert 5 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 5} == Down.IO.info(pid, :buffer_size)
 
       TestBackend.fake_message(pid, :done)
-      assert 5 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 5} == Down.IO.info(pid, :buffer_size)
 
       assert "chunk" == Down.IO.chunk(pid)
-      assert 0 == Down.IO.info(pid, :buffer_size)
+      assert {:buffer_size, 0} == Down.IO.info(pid, :buffer_size)
     end
 
     test "with :content_length", %{opts: opts} do
       headers = [{"foo", "bar"}, {"content-length", "100"}]
       pid = open(opts, 203, headers)
 
-      assert 100 == Down.IO.info(pid, :content_length)
+      assert {:content_length, 100} == Down.IO.info(pid, :content_length)
     end
 
     # TODO
@@ -469,33 +455,33 @@ defmodule Down.IOTest do
 
     test "with :error", %{opts: opts} do
       pid = open(opts)
-      assert nil == Down.IO.info(pid, :error)
+      assert {:error, nil} == Down.IO.info(pid, :error)
 
       TestBackend.fake_message(pid, {:error, :unknown})
-      assert :unknown == Down.IO.info(pid, :error)
+      assert {:error, :unknown} == Down.IO.info(pid, :error)
     end
 
     test "with :max_redirections", %{opts: opts} do
       opts = [{:max_redirections, 3} | opts]
       pid = open(opts)
-      assert 3 == Down.IO.info(pid, :max_redirections)
+      assert {:max_redirections, 3} == Down.IO.info(pid, :max_redirections)
     end
 
     test "with :min_buffer_size", %{opts: opts} do
       opts = [{:buffer_size, 3} | opts]
       pid = open(opts)
-      assert 3 == Down.IO.info(pid, :min_buffer_size)
+      assert {:min_buffer_size, 3} == Down.IO.info(pid, :min_buffer_size)
     end
 
     test "with :position", %{opts: opts} do
       pid = open(opts)
-      assert 0 == Down.IO.info(pid, :position)
+      assert {:position, 0} == Down.IO.info(pid, :position)
 
       TestBackend.fake_message(pid, {:chunk, "chunk"})
-      assert 5 == Down.IO.info(pid, :position)
+      assert {:position, 5} == Down.IO.info(pid, :position)
 
       TestBackend.fake_message(pid, {:chunk, "chunk"})
-      assert 10 == Down.IO.info(pid, :position)
+      assert {:position, 10} == Down.IO.info(pid, :position)
     end
 
     test "with :redirections", %{opts: opts} do
@@ -511,13 +497,14 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^headers_msg}
       assert_receive {TestBackend, :start}
 
-      assert [
-               %{
-                 headers: [{"location", "http://localhost/redirect_1"}],
-                 status_code: 301,
-                 url: "http://localhost/"
-               }
-             ] == Down.IO.info(pid, :redirections)
+      assert {:redirections,
+              [
+                %{
+                  headers: [{"location", "http://localhost/redirect_1"}],
+                  status_code: 301,
+                  url: "http://localhost/"
+                }
+              ]} == Down.IO.info(pid, :redirections)
 
       headers = [{"location", "http://localhost/redirect_2"}]
       status_msg = {:status_code, 301}
@@ -528,18 +515,19 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^headers_msg}
       assert_receive {TestBackend, :start}
 
-      assert [
-               %{
-                 headers: [{"location", "http://localhost/redirect_2"}],
-                 status_code: 301,
-                 url: "http://localhost/redirect_1"
-               },
-               %{
-                 headers: [{"location", "http://localhost/redirect_1"}],
-                 status_code: 301,
-                 url: "http://localhost/"
-               }
-             ] == Down.IO.info(pid, :redirections)
+      assert {:redirections,
+              [
+                %{
+                  headers: [{"location", "http://localhost/redirect_2"}],
+                  status_code: 301,
+                  url: "http://localhost/redirect_1"
+                },
+                %{
+                  headers: [{"location", "http://localhost/redirect_1"}],
+                  status_code: 301,
+                  url: "http://localhost/"
+                }
+              ]} == Down.IO.info(pid, :redirections)
 
       headers = [{"location", "http://localhost/redirect_3"}]
       status_msg = {:status_code, 301}
@@ -550,72 +538,75 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^headers_msg}
       assert_receive {TestBackend, :start}
 
-      assert [
-               %{
-                 headers: [{"location", "http://localhost/redirect_3"}],
-                 status_code: 301,
-                 url: "http://localhost/redirect_2"
-               },
-               %{
-                 headers: [{"location", "http://localhost/redirect_2"}],
-                 status_code: 301,
-                 url: "http://localhost/redirect_1"
-               },
-               %{
-                 headers: [{"location", "http://localhost/redirect_1"}],
-                 status_code: 301,
-                 url: "http://localhost/"
-               }
-             ] == Down.IO.info(pid, :redirections)
+      assert {:redirections,
+              [
+                %{
+                  headers: [{"location", "http://localhost/redirect_3"}],
+                  status_code: 301,
+                  url: "http://localhost/redirect_2"
+                },
+                %{
+                  headers: [{"location", "http://localhost/redirect_2"}],
+                  status_code: 301,
+                  url: "http://localhost/redirect_1"
+                },
+                %{
+                  headers: [{"location", "http://localhost/redirect_1"}],
+                  status_code: 301,
+                  url: "http://localhost/"
+                }
+              ]} == Down.IO.info(pid, :redirections)
     end
 
     test "with :request", %{opts: opts} do
       pid = open(opts)
 
-      assert %{
-               headers: [{"User-Agent", "Down/0.0.1"}],
-               method: :get,
-               url: "http://localhost/"
-             } = Down.IO.info(pid, :request)
+      assert {:request,
+              %{
+                headers: [{"User-Agent", "Down/0.0.1"}],
+                method: :get,
+                url: "http://localhost/"
+              }} = Down.IO.info(pid, :request)
     end
 
     test "with :response", %{opts: opts} do
       headers = [{"foo", "bar"}, {"content-length", 100}]
       pid = open(opts, 203, headers)
 
-      assert %{
-               headers: ^headers,
-               size: 100,
-               encoding: nil,
-               status_code: 203
-             } = Down.IO.info(pid, :response)
+      assert {:response,
+              %{
+                headers: ^headers,
+                size: 100,
+                encoding: nil,
+                status_code: 203
+              }} = Down.IO.info(pid, :response)
     end
 
     test "with :status", %{opts: opts} do
       assert {:ok, pid} = Down.open("http://localhost/", opts)
 
-      assert :connecting == Down.IO.info(pid, :status)
+      assert {:status, :connecting} == Down.IO.info(pid, :status)
       TestBackend.fake_message(pid, {:status_code, 200})
-      assert :streaming == Down.IO.info(pid, :status)
+      assert {:status, :streaming} == Down.IO.info(pid, :status)
 
       TestBackend.fake_message(pid, {:headers, []})
-      assert :streaming == Down.IO.info(pid, :status)
+      assert {:status, :streaming} == Down.IO.info(pid, :status)
 
       TestBackend.fake_message(pid, {:chunk, "chunk"})
-      assert :streaming == Down.IO.info(pid, :status)
+      assert {:status, :streaming} == Down.IO.info(pid, :status)
 
       TestBackend.fake_message(pid, :done)
-      assert :completed == Down.IO.info(pid, :status)
+      assert {:status, :completed} == Down.IO.info(pid, :status)
 
       Down.IO.close(pid)
 
       assert {:ok, pid} = Down.open("http://localhost/", opts)
       TestBackend.fake_message(pid, {:error, :unknown})
-      assert :error == Down.IO.info(pid, :status)
+      assert {:status, :error} == Down.IO.info(pid, :status)
 
       assert {:ok, pid} = Down.open("http://localhost/", opts)
       Down.IO.cancel(pid)
-      assert :cancelled == Down.IO.info(pid, :status)
+      assert {:status, :cancelled} == Down.IO.info(pid, :status)
     end
 
     test "with list", %{opts: opts} do
@@ -640,23 +631,25 @@ defmodule Down.IOTest do
       ]
 
       assert [
-               5,
-               100,
-               nil,
-               :refused,
-               5,
-               102_400,
-               5,
-               [],
-               %{headers: [{"User-Agent", "Down/0.0.1"}], method: :get, url: "http://localhost/"},
-               %{
-                 encoding: nil,
-                 headers: [{"foo", "bar"}, {"content-length", 100}],
-                 size: 100,
-                 status_code: 203
-               },
-               :error
-             ] = Down.IO.info(pid, requests)
+               {:buffer_size, 5},
+               {:content_length, 100},
+               {:content_type, nil},
+               {:error, :refused},
+               {:max_redirections, 5},
+               {:min_buffer_size, 102_400},
+               {:position, 5},
+               {:redirections, []},
+               {:request,
+                %{headers: [{"User-Agent", "Down/0.0.1"}], method: :get, url: "http://localhost/"}},
+               {:response,
+                %{
+                  encoding: nil,
+                  headers: [{"foo", "bar"}, {"content-length", 100}],
+                  size: 100,
+                  status_code: 203
+                }},
+               {:status, :error}
+             ] == Down.IO.info(pid, requests)
     end
   end
 
@@ -673,7 +666,7 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^status_msg}
       assert_receive {TestBackend, :handle_message, ^headers_msg}
 
-      assert :redirecting == Down.IO.info(pid, :status)
+      assert {:status, :redirecting} == Down.IO.info(pid, :status)
 
       assert_receive {TestBackend, :stop}
       assert_receive {TestBackend, :start}
@@ -685,7 +678,7 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^status_msg}
       assert_receive {TestBackend, :handle_message, ^headers_msg}
 
-      assert :streaming == Down.IO.info(pid, :status)
+      assert {:status, :streaming} == Down.IO.info(pid, :status)
     end
 
     test "doesn't allow more than max_redirections", %{opts: opts} do
@@ -701,8 +694,8 @@ defmodule Down.IOTest do
       assert_receive {TestBackend, :handle_message, ^status_msg}
       assert_receive {TestBackend, :handle_message, ^headers_msg}
 
-      assert :error == Down.IO.info(pid, :status)
-      assert :too_many_redirects == Down.IO.info(pid, :error)
+      assert {:status, :error} == Down.IO.info(pid, :status)
+      assert {:error, :too_many_redirects} == Down.IO.info(pid, :error)
     end
   end
 

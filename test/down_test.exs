@@ -10,28 +10,15 @@ defmodule DownTest do
   #   body
   # end
 
-  # # @base_url "http://localhost:6080"
+  # @base_url "http://localhost:6080"
 
-  # test "default_backend/0" do
-  #   assert Down.MintBackend == Down.default_backend()
-  #   Application.put_env(:down, :backend, :fake_backend)
-  #   assert :fake_backend == Down.default_backend()
-  #   Application.delete_env(:down, :backend)
-  #   assert Down.MintBackend == Down.default_backend()
-  # end
-
-  # test "detect invalid urls" do
-  #   assert {:error, %Down.Error{reason: :invalid_url}} = Down.read("https://")
-  #   assert {:error, %Down.Error{reason: :invalid_url}} = Down.read("ftp://elixir-lang.com")
-
-  #   assert {:error, %Down.Error{reason: :invalid_url}} =
-  #            Down.read("https://elixir-lang.com:66666")
-  # end
-
-  # test "detect invalid methods" do
-  #   assert {:error, %Down.Error{reason: :invalid_method}} =
-  #            Down.read("https://elixir-lang.com/", method: :load)
-  # end
+  test "default_backend/0" do
+    assert Down.MintBackend == Down.default_backend()
+    Application.put_env(:down, :backend, :fake_backend)
+    assert :fake_backend == Down.default_backend()
+    Application.delete_env(:down, :backend)
+    assert Down.MintBackend == Down.default_backend()
+  end
 
   # describe "real" do
   #   setup do
@@ -57,10 +44,10 @@ defmodule DownTest do
   #   end
   # end
 
-  # for backend <- [Down.HttpcBackend] do
-  # for backend <- [Down.IBrowseBackend] do
-  # for backend <- [Down.HackneyBackend] do
-  # for backend <- [Down.MintBackend] do
+  # # for backend <- [Down.HttpcBackend] do
+  # # for backend <- [Down.IBrowseBackend] do
+  # # for backend <- [Down.HackneyBackend] do
+  # # for backend <- [Down.MintBackend] do
   # for backend <- [Down.HackneyBackend, Down.IBrowseBackend, Down.HttpcBackend, Down.MintBackend] do
   #   @backend backend
 

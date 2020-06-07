@@ -1,47 +1,53 @@
 defmodule Down do
-  @moduledoc """
-  Down is a utility tool for streaming, flexible and safe downloading of remote
-  files.
+  @external_resource "README.md"
+  @moduledoc @external_resource
+             |> File.read!()
+             |> String.split("<!-- MDOC !-->")
+             |> Enum.fetch!(1)
 
-  Down is a thin wrapper around different HTTP backends focus on
-  efficient and safe downloads.
-  It also allows you to change backend without any code modification.
+  # @moduledoc """
+  # Down is a utility tool for streaming, flexible and safe downloading of remote
+  # files.
 
-  The API is very small, it only consist in three operations:
+  # Down is a thin wrapper around different HTTP backends focus on
+  # efficient and safe downloads.
+  # It also allows you to change backend without any code modification.
 
-  * `read/2` to download the content directly in memory.
-  * `download/2` to download the content in a local file.
-  * `stream/2` allows to have a a much more precise control of the download.
+  # The API is very small, it only consist in three operations:
 
-  ## Shared options
+  # * `read/2` to download the content directly in memory.
+  # * `download/2` to download the content in a local file.
+  # * `stream/2` allows to have a a much more precise control of the download.
 
-  All the Down operations accept the following options:
+  # ## Shared options
 
-  * `:max_size` - The maximum size in bytes of the download.
-    If the content is larger than this limit the function will return `{:error, :too_large}`.
-  * `:headers` - A Keyword or a Map containing all request headers.
-    The key and value are converted to strings.
-  * `:method` - HTTP method used by the request.
-    Possible values: `:get`, `:post`, `:delete`, `:put`, `:patch`, `:options`, `:head`, `:connect`, `:trace`.
-    Default `:get`.
-  * `:body`- HTTP body request in binary format. Default: `nil`.
-  * `:backend` - The backend to use during for the request.
-    Possible values: `:hackney`, `:httpc` and `:httpoison`.
-  * `:backend_opts` - Additional options passed to the backend.
-    Notice: Down uses some options to work with the backend. In case of conflict,
-    Down options will be used.
-  * `:total_timeout` - Timeout time for the request.
-    The clock starts ticking when the request is sent.
-    Time is in milliseconds.
-    Default is `:infinity`.
-  * `:recv_timeout` - If a persistent connection is idle longer than the `:recv_timeout`
-    in milliseconds, the client closes the connection.
-    The server can also have such a timeout but do not take that for granted.
-    Default is 30_000.
-    Only implemented for `:ibrowse` backend.
-  * `:connect_timeout` - The time in milliseconds to wait for the request to connect,
-    :infinity will wait indefinitely. The default is 15_000.
-  """
+  # All the Down operations accept the following options:
+
+  # * `:max_size` - The maximum size in bytes of the download.
+  #   If the content is larger than this limit the function will return `{:error, :too_large}`.
+  # * `:headers` - A Keyword or a Map containing all request headers.
+  #   The key and value are converted to strings.
+  # * `:method` - HTTP method used by the request.
+  #   Possible values: `:get`, `:post`, `:delete`, `:put`, `:patch`, `:options`, `:head`, `:connect`, `:trace`.
+  #   Default `:get`.
+  # * `:body`- HTTP body request in binary format. Default: `nil`.
+  # * `:backend` - The backend to use during for the request.
+  #   Possible values: `:hackney`, `:httpc` and `:httpoison`.
+  # * `:backend_opts` - Additional options passed to the backend.
+  #   Notice: Down uses some options to work with the backend. In case of conflict,
+  #   Down options will be used.
+  # * `:total_timeout` - Timeout time for the request.
+  #   The clock starts ticking when the request is sent.
+  #   Time is in milliseconds.
+  #   Default is `:infinity`.
+  # * `:recv_timeout` - If a persistent connection is idle longer than the `:recv_timeout`
+  #   in milliseconds, the client closes the connection.
+  #   The server can also have such a timeout but do not take that for granted.
+  #   Default is 30_000.
+  #   Only implemented for `:ibrowse` backend.
+  # * `:connect_timeout` - The time in milliseconds to wait for the request to connect,
+  #   :infinity will wait indefinitely. The default is 15_000.
+  # """
 
   @type url :: String.t()
   @type opts :: map() | Keyword.t()
@@ -61,15 +67,13 @@ defmodule Down do
           recv_timeout: timeout()
         }
 
-  @type response :: %{
-          headers: nil | headers,
-          status_code: nil | non_neg_integer(),
-          size: nil | non_neg_integer(),
-          encoding: nil | String.t()
-        }
-
   @default_backend [Down.MintBackend, Down.HackneyBackend, Down.IbrowseBackend, Down.HttpcBackend]
-                   |> Enum.find(&Code.ensure_loaded?(&1))
+                   |> Enum.find_value(fn module ->
+                     case Code.ensure_compiled(module) do
+                       {:module, module} -> module
+                       {:error, _} -> nil
+                     end
+                   end)
   @doc """
   Returns the backend used in case none is passed as an option in any operation.
 
@@ -93,8 +97,8 @@ defmodule Down do
 
   The remote connection isn't created until the first chunk is requested.
   """
-  @spec stream(url, opts) :: {:ok, Stream.t()} | {:error, Down.Error.t()}
-  def stream(url, opts \\ []) do
+  @spec stream(url() | pid(), opts) :: Enumerable.t()
+  def stream(url, opts \\ []) when is_binary(url) do
     start_fun = fn ->
       {:ok, pid} = Down.IO.start_link(url, opts)
       pid
@@ -112,8 +116,11 @@ defmodule Down do
       Down.IO.close(pid)
     end
 
-    {:ok, Stream.resource(start_fun, next_fun, stop_fun)}
+    Stream.resource(start_fun, next_fun, stop_fun)
   end
+
+  # def stream(pid, opts \\ []) when is_pid(pid) do
+  # end
 
   # @spec download(url(), opts()) :: Download.t()
   # def download(url, opts \\ %{}), do: run(:download, url, opts)
@@ -135,5 +142,8 @@ defmodule Down do
 
   def open(url, opts \\ []) do
     Down.IO.start_link(url, opts)
+  end
+
+  def request(url, opts \\ []) do
   end
 end

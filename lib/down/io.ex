@@ -20,6 +20,13 @@ defmodule Down.IO do
           headers: Down.headers()
         }
 
+  @type response :: %{
+          headers: nil | Down.headers(),
+          status_code: nil | non_neg_integer(),
+          size: nil | non_neg_integer(),
+          encoding: nil | String.t()
+        }
+
   @type state :: %{
           backend: Down.Backend.t(),
           backend_data: term(),
@@ -35,7 +42,7 @@ defmodule Down.IO do
           position: non_neg_integer(),
           redirections: [redirection()],
           request: Down.request(),
-          response: Down.response(),
+          response: response(),
           status: status()
         }
 
@@ -110,11 +117,12 @@ defmodule Down.IO do
     GenServer.call(pid, :flush)
   end
 
+  @spec info(pid(), info_request()) :: {info_request(), any()}
   def info(pid, request) when request in @info_request do
     GenServer.call(pid, {:info, request})
   end
 
-  # TODO TESTS
+  @spec info(pid(), [info_request()]) :: [{info_request(), any()}]
   def info(pid, requests) when is_list(requests) do
     Enum.each(requests, &(&1 in @info_request || raise(ArgumentError, inspect(&1))))
     GenServer.call(pid, {:info, requests})
@@ -162,7 +170,7 @@ defmodule Down.IO do
     end
   end
 
-  @spec new_response() :: Down.response()
+  @spec new_response() :: response()
   defp new_response(), do: %{headers: nil, status_code: nil, size: nil, encoding: nil}
 
   @spec build_req(Options.t()) :: Down.request()
@@ -252,49 +260,49 @@ defmodule Down.IO do
   end
 
   def handle_call({:info, :buffer_size}, _from, state) do
-    {:reply, state.buffer_size, state}
+    {:reply, {:buffer_size, state.buffer_size}, state}
   end
 
   def handle_call({:info, :content_length}, _from, state) do
-    {:reply, state.response.size, state}
+    {:reply, {:content_length, state.response.size}, state}
   end
 
   def handle_call({:info, :content_type}, _from, state) do
-    {:reply, state.response.encoding, state}
+    {:reply, {:content_type, state.response.encoding}, state}
   end
 
   def handle_call({:info, :error}, _from, state) do
-    {:reply, state.error, state}
+    {:reply, {:error, state.error}, state}
   end
 
   def handle_call({:info, :max_redirections}, _from, state) do
-    {:reply, state.max_redirections, state}
+    {:reply, {:max_redirections, state.max_redirections}, state}
   end
 
   def handle_call({:info, :min_buffer_size}, _from, state) do
-    {:reply, state.min_buffer_size, state}
+    {:reply, {:min_buffer_size, state.min_buffer_size}, state}
   end
 
   def handle_call({:info, :position}, _from, state) do
-    {:reply, state.position, state}
+    {:reply, {:position, state.position}, state}
   end
 
   def handle_call({:info, :redirections}, _from, state) do
-    {:reply, state.redirections, state}
+    {:reply, {:redirections, state.redirections}, state}
   end
 
   def handle_call({:info, :request}, _from, state) do
     request = Map.take(state.request, [:url, :method, :headers])
-    {:reply, request, state}
+    {:reply, {:request, request}, state}
   end
 
   def handle_call({:info, :response}, _from, state) do
-    request = Map.take(state.response, [:status_code, :size, :encoding, :headers])
-    {:reply, request, state}
+    response = Map.take(state.response, [:status_code, :size, :encoding, :headers])
+    {:reply, {:response, response}, state}
   end
 
   def handle_call({:info, :status}, _from, state) do
-    {:reply, state.status, state}
+    {:reply, {:status, state.status}, state}
   end
 
   def handle_call({:info, list}, _from, state) do

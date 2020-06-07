@@ -4,8 +4,6 @@ defmodule Down.OptionsTest do
   alias Down.Options
   alias Down.Error
 
-  # FIXME
-  @moduletag skip: true
   @valid_url "http://url.com/"
   describe "build/2" do
     test "set default options" do

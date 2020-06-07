@@ -48,9 +48,8 @@ defmodule Down.MixProject do
       {:castore, "~> 0.1", optional: true},
       {:mint, "~> 1.0", optional: true},
       {:benchee, "~> 1.0.0", only: :dev},
-      {:tesla, "~> 1.3.3", only: :dev},
+      {:jason, "~> 1.2", only: :test},
       {:dialyxir, "~> 1.0", only: :dev, runtime: false},
-      {:bypass, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false}
     ]
   end

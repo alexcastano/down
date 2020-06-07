@@ -92,7 +92,7 @@ if Code.ensure_loaded?(Mint.HTTP) do
       do: {:status_code, status}
 
     def handle_mint_msg({:headers, request_ref, headers}, request_ref),
-      do: {:headers, Map.new(headers)}
+      do: {:headers, headers}
 
     def handle_mint_msg({:data, request_ref, chunk}, request_ref),
       do: {:chunk, chunk}
